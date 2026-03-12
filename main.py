@@ -13,90 +13,88 @@ def home():
 
 # ── Configuration IA ──
 genai.configure(api_key=os.getenv("GEMINI_KEY"))
-model = genai.GenerativeModel('gemini-2.0-flash')  # Vérifie le nom du modèle
+model = genai.GenerativeModel('gemini-3-flash-preview')
 
-# Table de caractères (DOIT correspondre à la liste Scratch, index 1 à 56)
+# Table de caractères (index 1 à 56, doit correspondre à la liste Scratch)
 CHARS = " abcdefghijklmnopqrstuvwxyz0123456789.,!?@'\"()+-*/=:_éàè"
 
-# ── Fonctions d'encodage/décodage ──
+# ── Encodage / Décodage ──
 
 def decode_from_scratch(encoded_str):
-    """'10506' → 'de'  (retire le préfixe '1', lit par paires)"""
-    data = str(encoded_str)[1:]          # retirer le "1"
+    """'11902122120' → 'salut'"""
+    data = str(encoded_str)[1:]  # retirer le préfixe "1"
     text = ""
     for i in range(0, len(data), 2):
         idx = int(data[i:i+2])
         if 1 <= idx <= len(CHARS):
-            text += CHARS[idx - 1]       # -1 car Python est 0-indexé
+            text += CHARS[idx - 1]
     return text
 
 def encode_for_scratch(text):
-    """'de' → '20506'  (ajoute le préfixe '2', chaque char = 2 chiffres)"""
+    """'bonjour' → '2031516101721'"""
     encoded = "2"
     for char in text.lower():
         if char in CHARS:
-            idx = CHARS.index(char) + 1  # +1 car Scratch est 1-indexé
-            encoded += str(idx).zfill(2)  # zéro-padding : 5 → "05"
+            idx = CHARS.index(char) + 1
+            encoded += str(idx).zfill(2)  # 5 → "05"
     return encoded
 
 # ── Connexion Scratch ──
 print("🔌 Connexion à Scratch...")
 try:
     session = scratch.login(os.getenv("SCRATCH_USER"), os.getenv("SCRATCH_PASS"))
-    # Alternative si le login par mot de passe ne marche plus :
-    # session = scratch.Session(os.getenv("SCRATCH_SESSION"), username=os.getenv("SCRATCH_USER"))
     conn = session.connect_cloud(os.getenv("SCRATCH_ID"))
-    print("✅ Connecté à Scratch !")
+    print("✅ Connecté !")
 except Exception as e:
-    print(f"❌ Connexion Scratch échouée : {e}")
+    print(f"❌ Connexion échouée : {e}")
     conn = None
 
 # ── Boucle principale ──
 
 def boucle_scratch():
     if conn is None:
-        print("❌ Pas de connexion, boucle arrêtée.")
+        print("❌ Pas de connexion cloud.")
         return
 
     last_val = "0"
     while True:
         try:
             raw = conn.get_var("message")
-            valeur = str(raw).split(".")[0]   # "0.0" → "0"
+            valeur = str(raw).split(".")[0]
 
             if valeur != "0" and valeur != last_val and valeur.startswith("1"):
                 last_val = valeur
 
-                # 1) DÉCODER le message Scratch
+                # 1) Décoder
                 question = decode_from_scratch(valeur)
                 print(f"📩 Question : {question}")
 
-                # 2) Demander à l'IA
+                # 2) IA
                 res = model.generate_content(
                     "Réponds en français, très court (max 30 caractères, "
                     "pas d'émoji, pas de markdown) : " + question
                 )
                 reponse = res.text.strip()
-
-                # 3) Nettoyer (garder uniquement les caractères supportés)
                 reponse = ''.join(c for c in reponse.lower() if c in CHARS)[:40]
                 print(f"🤖 Réponse : {reponse}")
 
-                # 4) ENCODER et envoyer sur la MÊME variable
+                # 3) Encoder et envoyer sur "Messages sent"
                 encoded = encode_for_scratch(reponse)
-                conn.set_var("message", encoded)
+                conn.set_var("Messages sent", encoded)
                 print(f"📤 Envoyé : {encoded}")
+
+                # 4) Remettre message à 0
+                conn.set_var("message", "0")
 
             time.sleep(2)
 
         except Exception as e:
-            print(f"❌ Erreur boucle : {e}")
+            print(f"❌ Erreur : {e}")
             time.sleep(5)
 
-# ── Lancement (HORS du if __name__) ──
+# Lancer HORS du if __name__ (pour gunicorn)
 thread = threading.Thread(target=boucle_scratch, daemon=True)
 thread.start()
-print("🚀 Thread Scratch démarré !")
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=10000)

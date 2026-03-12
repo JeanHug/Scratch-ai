@@ -3,86 +3,88 @@ import time
 import scratchattach as scratch
 import google.generativeai as genai
 
-# --- RÉCUPÉRATION DES SECRETS (Variables d'environnement) ---
-# Sur Render, tu devras créer ces 4 variables dans l'onglet 'Environment'
+# --- CONFIGURATION (Variables d'environnement sur Render) ---
 USERNAME = os.getenv("SCRATCH_USER")
 PASSWORD = os.getenv("SCRATCH_PASS")
 PROJECT_ID = os.getenv("SCRATCH_ID")
 API_KEY = os.getenv("GEMINI_KEY")
 
+# NOM DE TA VARIABLE (Ex: "message" si ta variable est ☁ message)
+CLOUD_VAR_NAME = "message" 
+
 # --- CONFIGURATION GEMINI ---
 genai.configure(api_key=API_KEY)
-# On utilise le modèle exact que tu as demandé
 model = genai.GenerativeModel('gemini-3-flash-preview')
 
-# --- CONFIGURATION SCRATCH ---
-# Cette liste doit être la même dans ton projet Scratch (index 1 = espace)
+# --- TABLE DE CARACTÈRES (Strictement identique à Scratch) ---
 CHARS = " abcdefghijklmnopqrstuvwxyz0123456789.,!?@'\"()+-*/=:_éàè"
 
-def decode_scratch(number_str):
-    """Transforme les chiffres de Scratch en texte pour l'IA"""
+def encode(text):
+    encoded = ""
+    for char in str(text).lower():
+        if char in CHARS:
+            index = CHARS.index(char)
+            encoded += str(index).zfill(2)
+    return encoded
+
+def decode(number_str):
     text = ""
     number_str = str(number_str)
     for i in range(0, len(number_str), 2):
         pair = number_str[i:i+2]
         if pair.isdigit():
-            index = int(pair)
-            if index < len(CHARS):
-                text += CHARS[index]
+            idx = int(pair)
+            if idx < len(CHARS):
+                text += CHARS[idx]
     return text
-
-def encode_scratch(text):
-    """Transforme la réponse de l'IA en chiffres pour Scratch"""
-    encoded = ""
-    for char in str(text).lower():
-        if char in CHARS:
-            index = CHARS.index(char)
-            # zfill(2) transforme '5' en '05'
-            encoded += str(index).zfill(2)
-    return encoded
 
 # --- CONNEXION ---
 try:
-    print("⏳ Connexion à Scratch...")
     session = scratch.login(USERNAME, PASSWORD)
     conn = session.connect_cloud(PROJECT_ID)
     client = scratch.CloudEvents(PROJECT_ID)
-    print(f"✅ Serveur prêt sur le projet {PROJECT_ID} !")
+    print(f"🚀 Serveur Talkie-Walkie actif sur la variable : {CLOUD_VAR_NAME}")
 except Exception as e:
-    print(f"❌ Erreur de connexion initiale : {e}")
+    print(f"❌ Erreur connexion : {e}")
 
 @client.event
 def on_set(event):
-    # Si la variable 'prompt' change et n'est pas '00' (notre code de reset)
-    if event.var == "prompt" and event.value != "00":
-        raw_value = event.value
-        question = decode_scratch(raw_value)
+    # On ne réagit que si la variable change et n'est pas "0"
+    if event.var == CLOUD_VAR_NAME and event.value != "0":
         
-        if not question.strip():
-            return
-
-        print(f"📩 Question reçue : {question}")
-
-        try:
-            # 1. On "reset" le prompt sur Scratch pour dire qu'on travaille
-            conn.set_var("prompt", "00")
-
-            # 2. On demande à Gemini
-            response = model.generate_content(question)
-            reponse_ia = response.text.replace("\n", " ") # Pas de saut de ligne
+        # SÉCURITÉ : On vérifie si le premier chiffre est "1" (Question)
+        # On va dire que Scratch envoie des questions commençant par "1"
+        # et le Python répond par des messages commençant par "2"
+        raw_val = str(event.value)
+        
+        if raw_val.startswith("1"):
+            # C'est une question ! On retire le "1" du début pour décoder
+            question_codee = raw_val[1:]
+            question_texte = decode(question_codee)
             
-            # 3. On coupe à 120 caractères (limite des 256 chiffres du Cloud)
-            reponse_finale = reponse_ia[:120]
-            
-            print(f"🤖 Réponse Gemini : {reponse_finale}")
+            print(f"📩 Question reçue : {question_texte}")
 
-            # 4. On envoie la réponse encodée sur la variable 'reponse'
-            conn.set_var("reponse", encode_scratch(reponse_finale))
-            print("📤 Réponse envoyée au Cloud.")
+            try:
+                # 1. On vide la variable pour dire "Je traite"
+                conn.set_var(CLOUD_VAR_NAME, "0")
+                
+                # 2. Appel Gemini
+                response = model.generate_content(question_texte)
+                reponse_ia = response.text.replace("\n", " ")[:100] # Max 100 car.
+                
+                print(f"🤖 Réponse Gemini : {reponse_ia}")
 
-        except Exception as e:
-            print(f"⚠️ Erreur durant le traitement : {e}")
-            conn.set_var("reponse", encode_scratch("erreur technique"))
+                # 3. On encode et on ajoute "2" au début (Marqueur de réponse)
+                reponse_prete = "2" + encode(reponse_ia)
+                
+                # 4. Envoi
+                time.sleep(1) # Petite pause pour la stabilité du cloud
+                conn.set_var(CLOUD_VAR_NAME, reponse_prete)
+                print("📤 Réponse envoyée avec succès.")
 
-# Lancement du script
+            except Exception as e:
+                print(f"⚠️ Erreur IA : {e}")
+                conn.set_var(CLOUD_VAR_NAME, "2" + encode("erreur de l ia"))
+
+# Lancement
 client.start()

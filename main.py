@@ -10,7 +10,7 @@ PROJECT_ID = os.getenv("SCRATCH_ID")
 API_KEY = os.getenv("GEMINI_KEY")
 
 # NOM DE TA VARIABLE (Ex: "Messages sent" si ta variable est ☁ message)
-CLOUD_VAR_NAME = "message" 
+CLOUD_VAR_NAME = "Messages sent" 
 
 # --- CONFIGURATION GEMINI ---
 genai.configure(api_key=API_KEY)

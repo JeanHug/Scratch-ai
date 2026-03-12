@@ -1,0 +1,2 @@
+scratchattach
+google-generativeai

@@ -1,34 +1,33 @@
-from flask import Flask
-from threading import Thread
 import os
+import time
+import threading
+from flask import Flask
+import scratchattach as scratch
+import google.generativeai as genai
 
-# --- PARTIE POUR GARDER LE SCRIPT EN VIE ---
+# --- CONFIGURATION (Tes variables d'environnement sur Render) ---
+USERNAME = os.getenv("SCRATCH_USER")
+PASSWORD = os.getenv("SCRATCH_PASS")
+PROJECT_ID = os.getenv("SCRATCH_ID")
+API_KEY = os.getenv("GEMINI_KEY")
+CLOUD_VAR_NAME = "message"  # Vérifie bien que ta variable sur Scratch s'appelle comme ça
+
+# --- 1. CONFIGURATION FLASK (Pour rester en ligne sur Render) ---
 app = Flask(__name__)
 @app.route('/')
 def home():
     return "Le robot est en ligne !"
 
-def run():
+def run_flask():
     app.run(host='0.0.0.0', port=10000)
 
-t = Thread(target=run)
-t.start()
-# ---------------------------------------------
+# Lancement du serveur web en arrière-plan
+flask_thread = threading.Thread(target=run_flask)
+flask_thread.start()
 
-# ... (le reste de ton code avec le scratch.login et la boucle while)import os
-import time
-import scratchattach as scratch
-import google.generativeai as genai
-
-# --- CONFIGURATION ---
-USERNAME = os.getenv("SCRATCH_USER")
-PASSWORD = os.getenv("SCRATCH_PASS")
-PROJECT_ID = os.getenv("SCRATCH_ID")
-API_KEY = os.getenv("GEMINI_KEY")
-CLOUD_VAR_NAME = "Messages sent" 
-
+# --- 2. CONFIGURATION IA ET SCRATCH ---
 genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel('gemini-3-flash-preview')
+model = genai.GenerativeModel('gemini-1.5-flash')
 CHARS = " abcdefghijklmnopqrstuvwxyz0123456789.,!?@'\"()+-*/=:_éàè"
 
 def encode(text):
@@ -42,35 +41,37 @@ def decode(number_str):
             text += CHARS[int(pair)]
     return text
 
-# --- CONNEXION ---
+# --- 3. CONNEXION SCRATCH ---
+print("Connexion à Scratch en cours...")
 session = scratch.login(USERNAME, PASSWORD)
 conn = session.connect_cloud(PROJECT_ID)
-
 print("🚀 Serveur actif. En attente de message...")
 
-# Boucle pour écouter les changements de la variable Cloud
+# --- 4. BOUCLE PRINCIPALE ---
 last_val = "0"
 while True:
     try:
         valeur = conn.get_var(CLOUD_VAR_NAME)
+        # Si la valeur change et commence par '1' (code d'envoi de l'utilisateur)
         if valeur != "0" and valeur != last_val:
             if str(valeur).startswith("1"):
                 question = decode(str(valeur)[1:])
-                print(f"📩 Question : {question}")
+                print(f"📩 Question reçue : {question}")
                 
-                # Effacer pour traiter
+                # Réinitialisation immédiate
                 conn.set_var(CLOUD_VAR_NAME, "0")
                 
-                # IA
+                # Appel IA
                 response = model.generate_content(question)
                 reponse_ia = response.text.replace("\n", " ")[:100]
                 
-                # Envoi
+                # Envoi réponse (code '2' + texte encodé)
                 conn.set_var(CLOUD_VAR_NAME, "2" + encode(reponse_ia))
                 print("📤 Réponse envoyée.")
-                last_val = "0"
+                
+            last_val = "0"
         
         time.sleep(1)
     except Exception as e:
-        print(f"Erreur : {e}")
+        print(f"Erreur dans la boucle : {e}")
         time.sleep(5)

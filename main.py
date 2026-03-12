@@ -1,4 +1,21 @@
+from flask import Flask
+from threading import Thread
 import os
+
+# --- PARTIE POUR GARDER LE SCRIPT EN VIE ---
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "Le robot est en ligne !"
+
+def run():
+    app.run(host='0.0.0.0', port=10000)
+
+t = Thread(target=run)
+t.start()
+# ---------------------------------------------
+
+# ... (le reste de ton code avec le scratch.login et la boucle while)import os
 import time
 import scratchattach as scratch
 import google.generativeai as genai

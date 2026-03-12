@@ -9,7 +9,7 @@ PASSWORD = os.getenv("SCRATCH_PASS")
 PROJECT_ID = os.getenv("SCRATCH_ID")
 API_KEY = os.getenv("GEMINI_KEY")
 
-# NOM DE TA VARIABLE (Ex: "message" si ta variable est ☁ message)
+# NOM DE TA VARIABLE (Ex: "Messages sent" si ta variable est ☁ message)
 CLOUD_VAR_NAME = "message" 
 
 # --- CONFIGURATION GEMINI ---

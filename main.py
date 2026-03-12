@@ -36,7 +36,7 @@ if __name__ == "__main__":
                     conn.set_var("message", "0")
                     # Traitement IA simplifié
                     res = model.generate_content("Réponds court: " + valeur)
-                    conn.set_var("message", "2" + res.text[:50])
+                    conn.set_var("Messages sent", "2" + res.text[:50])
                     print("📤 Envoyé.")
                 time.sleep(2)
             except Exception as e:

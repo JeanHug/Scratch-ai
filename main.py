@@ -25,7 +25,7 @@ USERNAME = os.getenv("SCRATCH_USER")
 PASSWORD = os.getenv("SCRATCH_PASS")
 PROJECT_ID = os.getenv("SCRATCH_ID")
 API_KEY = os.getenv("GEMINI_KEY")
-CLOUD_VAR_NAME = "message" 
+CLOUD_VAR_NAME = "Messages sent" 
 
 genai.configure(api_key=API_KEY)
 model = genai.GenerativeModel('gemini-3-flash-preview')

@@ -156,7 +156,7 @@ def traiter_message(val):
 
     reponse_clean = ''.join(
         c for c in reponse_brute.lower() if c in CHARS
-    )[:400000]
+    )[120]
     log(f"🧹 ÉTAPE 5 — Nettoyée : '{reponse_clean}'")
 
     if not reponse_clean:

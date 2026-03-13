@@ -21,13 +21,12 @@ model = genai.GenerativeModel('gemini-3-flash-preview')
 logs = []
 conn = None
 status = "Démarrage..."
-cycle_count = 0
 
 def log(msg):
     t = time.strftime("%H:%M:%S")
     entry = f"[{t}] {msg}"
     logs.append(entry)
-    if len(logs) > 100:
+    if len(logs) > 200:
         logs.pop(0)
     print(entry, flush=True)
 
@@ -48,48 +47,26 @@ def decode(s):
     return t
 
 def lire_variable():
-    """Lit la variable cloud — gère les 2 formats de l'API"""
-    global cycle_count
-    cycle_count += 1
-
     try:
         url = f"https://clouddata.scratch.mit.edu/logs?projectid={PROJECT_ID}&limit=5&offset=0"
         r = http_requests.get(url, timeout=10)
         texte = r.text.strip()
 
-        # Debug toutes les 10 lectures
-        if cycle_count % 10 == 1:
-            log(f"🔍 API brut ({len(texte)} chars) : {texte[:200]}")
-
-        # FORMAT 1 : Tableau JSON [{...},{...}]
         if texte.startswith('['):
             data = json.loads(texte)
             for entry in data:
                 if 'Messages sent' in entry.get('name', ''):
-                    val = str(entry.get('value', '0')).split('.')[0]
-                    if cycle_count % 10 == 1:
-                        log(f"🔍 Valeur trouvée (JSON array) : {val}")
-                    return val
-
-        # FORMAT 2 : JSON ligne par ligne
+                    return str(entry.get('value', '0')).split('.')[0]
         else:
             for line in texte.split('\n'):
                 try:
                     d = json.loads(line)
                     if 'Messages sent' in d.get('name', ''):
-                        val = str(d.get('value', '0')).split('.')[0]
-                        if cycle_count % 10 == 1:
-                            log(f"🔍 Valeur trouvée (ligne) : {val}")
-                        return val
+                        return str(d.get('value', '0')).split('.')[0]
                 except:
                     pass
-
-        if cycle_count % 10 == 1:
-            log(f"⚠️ Pas de 'Messages sent' trouvé dans la réponse")
-
     except Exception as e:
         log(f"❌ Erreur lecture API : {e}")
-
     return "0"
 
 def do_connect():
@@ -105,10 +82,6 @@ def do_connect():
         conn = None
         return False
 
-# ══════════════════════════════
-# BOUCLE IA
-# ══════════════════════════════
-
 def boucle_ia():
     global status
     time.sleep(2)
@@ -123,46 +96,101 @@ def boucle_ia():
         status = "❌ Connexion impossible"
         return
 
-    status = "✅ En ligne"
-    last = ""
-    log("🔄 Boucle IA démarrée !")
+    # IMPORTANT : lire la valeur actuelle et l'ignorer
+    # pour ne pas traiter un vieux message
+    old_val = lire_variable()
+    last = old_val
+    log(f"🔄 Valeur actuelle ignorée : {old_val}")
+    if old_val.startswith(("1","2")) and len(old_val) > 2:
+        try:
+            log(f"🔄 (c'était : '{decode(old_val)}')")
+        except:
+            pass
+
+    status = "✅ En ligne — en attente"
+    log("✅ Boucle IA prête — envoie un message depuis Scratch !")
 
     while True:
         try:
             val = lire_variable()
+            log(f"👁️ Lu : {val} (last={last})")
 
-            # Log la valeur quand elle change
-            if val != "0" and val != last:
-                log(f"📡 Nouvelle valeur détectée : {val}")
-                log(f"📡 Premier caractère : '{val[0]}' — commence par 1 ? {val.startswith('1')}")
-
+            # Nouveau message détecté
             if val.startswith("1") and len(val) > 2 and val != last:
                 last = val
+
+                # ÉTAPE 1 : Décoder
+                log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                log(f"📡 ÉTAPE 1 — Message brut reçu : {val}")
                 question = decode(val)
-                status = f"🤖 Répond à : {question}"
-                log(f"📩 Question : {question}")
+                log(f"📖 ÉTAPE 2 — Message décodé : '{question}'")
 
-                res = model.generate_content(
-                    "Réponds en français, très court, max 30 caractères, "
-                    "pas d'émoji, pas de markdown, pas de majuscules : " + question
-                )
-                reponse = ''.join(
-                    c for c in res.text.strip().lower() if c in CHARS
+                # ÉTAPE 3 : Envoyer à l'IA
+                log(f"🤖 ÉTAPE 3 — Envoi à Gemini...")
+                try:
+                    res = model.generate_content(
+                        "Réponds en français, très court, max 30 caractères, "
+                        "pas d'émoji, pas de markdown, pas de majuscules : " + question
+                    )
+                    reponse_brute = res.text.strip()
+                    log(f"🤖 ÉTAPE 4 — Réponse brute de l'IA : '{reponse_brute}'")
+                except Exception as e:
+                    log(f"❌ ERREUR IA : {e}")
+                    status = "✅ En ligne — en attente"
+                    continue
+
+                # ÉTAPE 5 : Nettoyer
+                reponse_clean = ''.join(
+                    c for c in reponse_brute.lower() if c in CHARS
                 )[:40]
-                log(f"🤖 Réponse : {reponse}")
+                log(f"🧹 ÉTAPE 5 — Réponse nettoyée : '{reponse_clean}'")
 
-                encoded = encode(reponse)
-                log(f"📤 Encodé : {encoded}")
+                if not reponse_clean:
+                    log("⚠️ Réponse vide après nettoyage !")
+                    status = "✅ En ligne — en attente"
+                    continue
 
-                conn.set_var("Messages sent", encoded)
-                log(f"✅ Envoyé à Scratch !")
-                status = "✅ En ligne"
+                # ÉTAPE 6 : Encoder
+                encoded = encode(reponse_clean)
+                log(f"🔢 ÉTAPE 6 — Réponse encodée : {encoded}")
+
+                # ÉTAPE 7 : Envoyer à Scratch
+                log(f"📤 ÉTAPE 7 — Envoi à Scratch...")
+                try:
+                    conn.set_var("Messages sent", encoded)
+                    log(f"✅ ÉTAPE 8 — Envoyé à Scratch !")
+                except Exception as e:
+                    log(f"❌ ERREUR envoi Scratch : {e}")
+                    log("🔄 Reconnexion...")
+                    do_connect()
+                    if conn:
+                        conn.set_var("Messages sent", encoded)
+                        log(f"✅ ÉTAPE 8 — Envoyé après reconnexion !")
+                    else:
+                        log(f"❌ Impossible d'envoyer")
+                        continue
+
+                # ÉTAPE 9 : Vérifier
+                time.sleep(2)
+                verif = lire_variable()
+                log(f"🔍 ÉTAPE 9 — Vérification : variable = {verif}")
+                if verif == encoded:
+                    log(f"✅ ÉTAPE 10 — Scratch a reçu : '{reponse_clean}'")
+                else:
+                    log(f"⚠️ ÉTAPE 10 — Variable différente : {verif}")
+                    if verif.startswith("2"):
+                        log(f"⚠️ (mais commence par 2, probablement OK)")
+                    else:
+                        log(f"❌ Scratch a peut-être écrasé la réponse")
+
+                log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                status = "✅ En ligne — en attente"
 
             elif val.startswith("2") and val != last:
-                # C'est une réponse déjà envoyée, on ignore
                 last = val
+                log(f"ℹ️ Réponse IA encore présente : {val}")
 
-            time.sleep(2)
+            time.sleep(3)
 
         except Exception as e:
             log(f"❌ Erreur boucle : {e}")
@@ -170,11 +198,7 @@ def boucle_ia():
             time.sleep(5)
             do_connect()
             if conn:
-                status = "✅ En ligne"
-
-# ══════════════════════════════
-# SELF-PING
-# ══════════════════════════════
+                status = "✅ En ligne — en attente"
 
 def self_ping():
     time.sleep(30)
@@ -186,10 +210,6 @@ def self_ping():
             pass
         time.sleep(300)
 
-# ══════════════════════════════
-# PAGE WEB
-# ══════════════════════════════
-
 HTML = """
 <!DOCTYPE html>
 <html>
@@ -198,23 +218,25 @@ HTML = """
 <title>IA Scratch</title>
 <style>
 body { font-family: monospace; background: #fff; padding: 20px;
-       max-width: 500px; margin: auto; }
+       max-width: 600px; margin: auto; }
 h1 { font-size: 18px; margin-bottom: 15px; }
 #status { font-size: 16px; padding: 10px; border: 2px solid #000;
           margin-bottom: 10px; text-align: center; }
-#logs { border: 1px solid #ccc; padding: 8px; height: 400px;
+#logs { border: 1px solid #ccc; padding: 8px; height: 500px;
         overflow-y: auto; font-size: 11px; background: #f9f9f9;
         line-height: 1.6; }
 .ok { color: green; font-weight: bold; }
 .err { color: red; font-weight: bold; }
-.debug { color: #666; }
+.step { color: #1565c0; }
+.sep { color: #999; }
+.eye { color: #888; font-size: 10px; }
 p { font-size: 11px; color: #888; margin: 8px 0; }
 </style>
 </head>
 <body>
 <h1>🤖 IA Scratch</h1>
 <div id="status">...</div>
-<p>Tout est automatique. Ouvre Scratch, appuie ESPACE, pose ta question.</p>
+<p>Ouvre Scratch, appuie ESPACE, pose ta question. Les étapes s'affichent ici :</p>
 <div id="logs"></div>
 <script>
 function r(){
@@ -225,7 +247,9 @@ function r(){
             let c='';
             if(l.includes('✅'))c='ok';
             else if(l.includes('❌'))c='err';
-            else if(l.includes('🔍'))c='debug';
+            else if(l.includes('ÉTAPE'))c='step';
+            else if(l.includes('━'))c='sep';
+            else if(l.includes('👁'))c='eye';
             h+='<div class="'+c+'">'+l+'</div>';
         });
         document.getElementById('logs').innerHTML=h;
@@ -246,7 +270,6 @@ def home():
 def api():
     return jsonify(status=status, logs=logs)
 
-# ── Démarrage ──
 threading.Thread(target=boucle_ia, daemon=True).start()
 threading.Thread(target=self_ping, daemon=True).start()
 

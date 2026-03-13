@@ -119,7 +119,7 @@ def demander_ia(question):
             log(f"🤖 Essai {model_name}...")
             m = genai.GenerativeModel(model_name)
             res = m.generate_content(
-                "Réponds en français, très court, max 30 caractères, "
+                "Réponds en français. "
                 "pas d'émoji, pas de markdown, pas de majuscules : " + question
             )
             log(f"✅ IA OK avec {model_name}")
@@ -156,7 +156,7 @@ def traiter_message(val):
 
     reponse_clean = ''.join(
         c for c in reponse_brute.lower() if c in CHARS
-    )[:40]
+    )[:400000]
     log(f"🧹 ÉTAPE 5 — Nettoyée : '{reponse_clean}'")
 
     if not reponse_clean:

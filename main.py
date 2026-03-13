@@ -1,7 +1,7 @@
 import os
 import time
 import json
-import requests
+import requests as http_requests
 from flask import Flask, request, jsonify, render_template_string
 import scratchattach as scratch
 
@@ -40,6 +40,10 @@ def decode(s):
             t += CHARS[idx - 1]
     return t
 
+# ══════════════════════════════════════
+# PAGE PRINCIPALE
+# ══════════════════════════════════════
+
 HTML = """
 <!DOCTYPE html>
 <html>
@@ -65,8 +69,6 @@ input { padding: 6px; border: 1px solid #000; font-family: monospace; width: 100
 .err { color: red; font-weight: bold; }
 .info { color: #333; }
 iframe { border: 1px solid #000; width: 100%; }
-#cloud_raw { background: #f5f5f5; border: 1px solid #000; padding: 8px; height: 150px;
-             overflow-y: auto; font-size: 11px; white-space: pre-wrap; }
 .status_bar { padding: 6px; border: 1px solid #000; margin-bottom: 10px;
               font-size: 13px; background: #ffe; }
 </style>
@@ -105,12 +107,6 @@ iframe { border: 1px solid #000; width: 100%; }
     </div>
 
     <div class="box">
-        <h2>4. CLOUD DATA (API Scratch directe)</h2>
-        <button onclick="loadCloud()">Charger les logs cloud</button>
-        <div id="cloud_raw">Clique sur le bouton...</div>
-    </div>
-
-    <div class="box">
         <h2>📋 LOGS</h2>
         <button onclick="refreshLogs()">Rafraîchir</button>
         <button onclick="api('/clear')">Effacer</button>
@@ -121,26 +117,29 @@ iframe { border: 1px solid #000; width: 100%; }
 <div class="col">
 
     <div class="box">
-        <h2>🎮 PROJET SCRATCH (embed)</h2>
-        <iframe src="https://scratch.mit.edu/projects/""" + PROJECT_ID + """/embed"
+        <h2>🎮 PROJET SCRATCH</h2>
+        <iframe src="https://scratch.mit.edu/projects/PROJ_ID/embed"
                 height="400" allowfullscreen></iframe>
     </div>
 
     <div class="box">
-        <h2>📊 CLOUD DATA VIEWER</h2>
-        <iframe id="cloud_iframe"
-                src="https://clouddata.scratch.mit.edu/logs?projectid=""" + PROJECT_ID + """&limit=20&offset=0"
-                height="300"></iframe>
-        <button onclick="document.getElementById('cloud_iframe').src=document.getElementById('cloud_iframe').src">
-            Recharger</button>
+        <h2>📊 CLOUD DATA (chargé par le serveur)</h2>
+        <button onclick="reloadCloud()">🔄 Recharger les données cloud</button>
+        <iframe id="cloud_frame" src="/cloud_viewer" height="300"></iframe>
+    </div>
+
+    <div class="box">
+        <h2>📊 VALEUR ACTUELLE</h2>
+        <button onclick="reloadCurrent()">🔄 Recharger</button>
+        <iframe id="current_frame" src="/current_value" height="100"></iframe>
     </div>
 
     <div class="box">
         <h2>ℹ️ INFOS</h2>
         <div style="font-size:12px; line-height:1.6;">
-            Projet : <b>""" + PROJECT_ID + """</b><br>
-            User : <b>""" + SCRATCH_USER + """</b><br>
-            Pass : <b>""" + ("*" * len(SCRATCH_PASS) if SCRATCH_PASS else "VIDE ❌") + """</b>
+            Projet : <b>PROJ_ID</b><br>
+            User : <b>SCRATCH_U</b><br>
+            Pass : <b>PASS_MASK</b>
         </div>
     </div>
 
@@ -155,12 +154,12 @@ function api(url) {
         .then(d => {
             document.getElementById('status').innerText = d.status || JSON.stringify(d);
             refreshLogs();
+            reloadCurrent();
         })
         .catch(e => {
             document.getElementById('status').innerText = 'FETCH ÉCHOUÉ : ' + e;
         });
 }
-
 function refreshLogs() {
     fetch('/logs').then(r => r.json()).then(d => {
         let html = '';
@@ -175,25 +174,120 @@ function refreshLogs() {
         el.scrollTop = el.scrollHeight;
     });
 }
-
-function loadCloud() {
-    document.getElementById('cloud_raw').innerText = 'Chargement...';
-    fetch('https://clouddata.scratch.mit.edu/logs?projectid=""" + PROJECT_ID + """&limit=20&offset=0')
-        .then(r => r.text())
-        .then(t => {
-            document.getElementById('cloud_raw').innerText = t || '(vide)';
-        })
-        .catch(e => {
-            document.getElementById('cloud_raw').innerText = 'Erreur : ' + e;
-        });
+function reloadCloud() {
+    document.getElementById('cloud_frame').src = '/cloud_viewer?' + Date.now();
 }
-
+function reloadCurrent() {
+    document.getElementById('current_frame').src = '/current_value?' + Date.now();
+}
 setInterval(refreshLogs, 3000);
+setInterval(reloadCurrent, 5000);
 refreshLogs();
 </script>
 </body>
 </html>
-"""
+""".replace("PROJ_ID", PROJECT_ID).replace("SCRATCH_U", SCRATCH_USER).replace("PASS_MASK", "*" * len(SCRATCH_PASS) if SCRATCH_PASS else "VIDE ❌")
+
+
+# ══════════════════════════════════════
+# PAGES IFRAME (chargées par le serveur)
+# ══════════════════════════════════════
+
+@app.route('/cloud_viewer')
+def cloud_viewer():
+    """Charge les cloud logs côté serveur et les affiche en HTML"""
+    try:
+        url = f"https://clouddata.scratch.mit.edu/logs?projectid={PROJECT_ID}&limit=30&offset=0"
+        r = http_requests.get(url, timeout=10)
+
+        if r.status_code != 200:
+            return f"<pre style='font-family:monospace;color:red'>Erreur HTTP {r.status_code}\n{r.text}</pre>"
+
+        lines = r.text.strip().split('\n')
+        html = """<html><head><meta charset="utf-8">
+        <style>
+        body { font-family: monospace; font-size: 12px; margin: 5px; background: #f9f9f9; }
+        table { border-collapse: collapse; width: 100%; }
+        td, th { border: 1px solid #ccc; padding: 3px 6px; text-align: left; }
+        th { background: #eee; }
+        .val { font-weight: bold; color: #333; }
+        .decoded { color: blue; }
+        </style></head><body>
+        <table><tr><th>Variable</th><th>Valeur brute</th><th>Décodé</th><th>Par</th><th>Quand</th></tr>"""
+
+        for line in lines:
+            try:
+                d = json.loads(line)
+                name = d.get('name', '?').replace('☁ ', '')
+                val = str(d.get('value', '?'))
+                user = d.get('user', '?')
+                ts = d.get('timestamp', 0)
+                t = time.strftime('%H:%M:%S', time.localtime(ts / 1000)) if ts else '?'
+
+                decoded = ""
+                val_clean = val.split('.')[0]
+                if val_clean.startswith('1') and len(val_clean) > 2:
+                    try:
+                        decoded = decode(val_clean)
+                    except:
+                        decoded = "?"
+                elif val_clean.startswith('2') and len(val_clean) > 2:
+                    try:
+                        decoded = decode(val_clean)
+                    except:
+                        decoded = "?"
+
+                html += f'<tr><td>{name}</td><td class="val">{val}</td>'
+                html += f'<td class="decoded">{decoded}</td><td>{user}</td><td>{t}</td></tr>'
+            except:
+                html += f'<tr><td colspan="5">{line[:100]}</td></tr>'
+
+        html += "</table></body></html>"
+        return html
+
+    except Exception as e:
+        return f"<pre style='font-family:monospace;color:red'>Erreur : {e}</pre>"
+
+
+@app.route('/current_value')
+def current_value():
+    """Affiche la valeur actuelle de la variable"""
+    try:
+        url = f"https://clouddata.scratch.mit.edu/logs?projectid={PROJECT_ID}&limit=5&offset=0"
+        r = http_requests.get(url, timeout=10)
+        lines = r.text.strip().split('\n')
+
+        for line in lines:
+            try:
+                d = json.loads(line)
+                if 'Messages sent' in d.get('name', ''):
+                    val = str(d.get('value', '0')).split('.')[0]
+                    decoded = ""
+                    if (val.startswith('1') or val.startswith('2')) and len(val) > 2:
+                        try:
+                            decoded = decode(val)
+                        except:
+                            decoded = "?"
+
+                    prefix = "USER→" if val.startswith('1') else "BOT→" if val.startswith('2') else ""
+                    color = "blue" if val.startswith('1') else "green" if val.startswith('2') else "black"
+
+                    return f"""<html><body style="font-family:monospace;font-size:13px;margin:5px">
+                    <b>☁ Messages sent</b> = <span style="color:{color}">{val}</span><br>
+                    <b>{prefix}</b> <span style="color:{color};font-size:16px">{decoded}</span>
+                    </body></html>"""
+            except:
+                pass
+
+        return "<html><body style='font-family:monospace;margin:5px'>Aucune donnée trouvée</body></html>"
+
+    except Exception as e:
+        return f"<html><body style='font-family:monospace;color:red;margin:5px'>Erreur : {e}</body></html>"
+
+
+# ══════════════════════════════════════
+# ROUTES API
+# ══════════════════════════════════════
 
 @app.route('/')
 def home():
@@ -204,9 +298,8 @@ def version():
     try:
         v = scratch.__version__ if hasattr(scratch, '__version__') else "inconnue"
         log(f"📦 scratchattach version : {v}")
-        # Lister les méthodes disponibles
         if conn:
-            methods = [m for m in dir(conn) if not m.startswith('_')]
+            methods = [m for m in dir(conn) if not m.startswith('_') and callable(getattr(conn, m, None))]
             log(f"📦 Méthodes conn : {methods}")
         return jsonify(status=f"Version : {v}")
     except Exception as e:
@@ -219,17 +312,14 @@ def connect():
     try:
         log(f"🔌 Login avec user={SCRATCH_USER}...")
         session_obj = scratch.login(SCRATCH_USER, SCRATCH_PASS)
-        log(f"✅ Login OK")
-        log(f"📦 Type session : {type(session_obj)}")
+        log("✅ Login OK")
     except Exception as e:
         log(f"❌ Login échoué : {e}")
         return jsonify(status=f"Login échoué : {e}")
-
     try:
         log(f"🔌 Connexion cloud projet {PROJECT_ID}...")
         conn = session_obj.connect_cloud(PROJECT_ID)
-        log(f"✅ Cloud connecté")
-        log(f"📦 Type conn : {type(conn)}")
+        log("✅ Cloud connecté")
         methods = [m for m in dir(conn) if not m.startswith('_') and callable(getattr(conn, m, None))]
         log(f"📦 Méthodes : {methods}")
         return jsonify(status="Connecté ✅")
@@ -241,7 +331,6 @@ def connect():
 def check_session():
     log(f"session_obj = {session_obj}")
     log(f"conn = {conn}")
-    log(f"type conn = {type(conn) if conn else 'None'}")
     return jsonify(status=f"session={session_obj is not None}, conn={conn is not None}")
 
 @app.route('/read_via_conn')
@@ -249,42 +338,35 @@ def read_via_conn():
     if not conn:
         log("❌ Pas connecté")
         return jsonify(status="Pas connecté")
-    try:
-        val = conn.get_var("Messages sent")
-        log(f"📖 conn.get_var → {val} (type: {type(val)})")
-        return jsonify(status=f"Lu : {val}")
-    except Exception as e:
-        log(f"❌ conn.get_var échoué : {e}")
-
-    # Essai avec le préfixe ☁
-    try:
-        val = conn.get_var("☁ Messages sent")
-        log(f"📖 conn.get_var(☁) → {val}")
-        return jsonify(status=f"Lu (☁) : {val}")
-    except Exception as e2:
-        log(f"❌ conn.get_var(☁) échoué : {e2}")
-        return jsonify(status=f"Échoué : {e} / {e2}")
+    for name in ["Messages sent", "☁ Messages sent"]:
+        try:
+            val = conn.get_var(name)
+            log(f"📖 conn.get_var('{name}') → {val} (type: {type(val).__name__})")
+            return jsonify(status=f"Lu : {val}")
+        except Exception as e:
+            log(f"❌ get_var('{name}') : {e}")
+    return jsonify(status="Toutes les lectures ont échoué")
 
 @app.route('/read_via_api')
 def read_via_api():
     try:
         url = f"https://clouddata.scratch.mit.edu/logs?projectid={PROJECT_ID}&limit=5&offset=0"
         log(f"📡 GET {url}")
-        r = requests.get(url, timeout=10)
-        log(f"📡 Status HTTP : {r.status_code}")
-        log(f"📡 Réponse : {r.text[:500]}")
-
-        # Parser pour trouver Messages sent
+        r = http_requests.get(url, timeout=10)
+        log(f"📡 HTTP {r.status_code}")
         lines = r.text.strip().split('\n')
         for line in lines:
             try:
                 data = json.loads(line)
                 if 'Messages sent' in data.get('name', ''):
-                    log(f"📖 API → {data['name']} = {data['value']}")
-                    return jsonify(status=f"API : {data['value']}")
+                    val = data['value']
+                    log(f"📖 API → {data['name']} = {val}")
+                    return jsonify(status=f"API : {val}")
             except:
                 pass
-        return jsonify(status=f"Données reçues, {len(lines)} lignes")
+        log(f"📡 {len(lines)} lignes, pas de Messages sent trouvé")
+        log(f"📡 Premières données : {r.text[:300]}")
+        return jsonify(status=f"{len(lines)} lignes reçues")
     except Exception as e:
         log(f"❌ API échoué : {e}")
         return jsonify(status=f"Erreur : {e}")
@@ -293,11 +375,7 @@ def read_via_api():
 def read_via_logs():
     try:
         cloud = scratch.get_cloud(PROJECT_ID)
-        log(f"📦 Type cloud : {type(cloud)}")
-        methods = [m for m in dir(cloud) if not m.startswith('_')]
-        log(f"📦 Méthodes : {methods}")
-
-        # Essayer plusieurs façons de lire
+        log(f"📦 Type : {type(cloud).__name__}")
         for name in ["Messages sent", "☁ Messages sent"]:
             try:
                 val = cloud.get_var(name)
@@ -305,8 +383,7 @@ def read_via_logs():
                 return jsonify(status=f"Lu : {val}")
             except Exception as e:
                 log(f"❌ get_var('{name}') : {e}")
-
-        return jsonify(status="Toutes les méthodes de lecture ont échoué")
+        return jsonify(status="Échoué")
     except Exception as e:
         log(f"❌ get_cloud échoué : {e}")
         return jsonify(status=f"Erreur : {e}")
@@ -316,24 +393,20 @@ def write_encoded():
     msg = request.args.get('msg', '')
     if not conn:
         log("❌ Pas connecté")
-        return jsonify(status="Pas connecté")
+        return jsonify(status="Pas connecté — clique Se connecter d'abord")
     try:
         encoded = encode(msg)
-        log(f"📤 Texte : '{msg}'")
-        log(f"📤 Encodé : {encoded}")
-
-        # Essayer les deux noms
+        log(f"📤 Texte : '{msg}' → Encodé : {encoded}")
         for name in ["Messages sent", "☁ Messages sent"]:
             try:
                 conn.set_var(name, encoded)
-                log(f"✅ set_var('{name}', {encoded}) → OK")
-                return jsonify(status=f"Envoyé via '{name}' : {encoded}")
+                log(f"✅ set_var('{name}', {encoded})")
+                return jsonify(status=f"Envoyé via '{name}'")
             except Exception as e:
-                log(f"❌ set_var('{name}') échoué : {e}")
-
+                log(f"❌ set_var('{name}') : {e}")
         return jsonify(status="Toutes les écritures ont échoué")
     except Exception as e:
-        log(f"❌ Encodage échoué : {e}")
+        log(f"❌ {e}")
         return jsonify(status=f"Erreur : {e}")
 
 @app.route('/write_raw')
@@ -342,18 +415,14 @@ def write_raw():
     if not conn:
         log("❌ Pas connecté")
         return jsonify(status="Pas connecté")
-    try:
-        for name in ["Messages sent", "☁ Messages sent"]:
-            try:
-                conn.set_var(name, val)
-                log(f"✅ set_var('{name}', {val}) → OK")
-                return jsonify(status=f"Écrit '{name}' = {val}")
-            except Exception as e:
-                log(f"❌ set_var('{name}') échoué : {e}")
-        return jsonify(status="Échec")
-    except Exception as e:
-        log(f"❌ {e}")
-        return jsonify(status=f"Erreur : {e}")
+    for name in ["Messages sent", "☁ Messages sent"]:
+        try:
+            conn.set_var(name, val)
+            log(f"✅ set_var('{name}', {val})")
+            return jsonify(status=f"Écrit '{name}' = {val}")
+        except Exception as e:
+            log(f"❌ set_var('{name}') : {e}")
+    return jsonify(status="Échec")
 
 @app.route('/logs')
 def get_logs():

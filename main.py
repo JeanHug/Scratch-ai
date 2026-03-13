@@ -104,7 +104,7 @@ def demander_ia(question):
         try:
             m = genai.GenerativeModel(working_model)
             res = m.generate_content(
-                "Réponds en français, très court, max 30 caractères, "
+                "Réponds en français."
                 "pas d'émoji, pas de markdown, pas de majuscules : " + question
             )
             log(f"✅ IA OK ({working_model})")

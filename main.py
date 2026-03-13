@@ -13,7 +13,7 @@ CHARS = " abcdefghijklmnopqrstuvwxyz0123456789.,!?@'\"()+-*/=:_éàè"
 PROJECT_ID = os.getenv("SCRATCH_ID", "")
 SCRATCH_USER = os.getenv("SCRATCH_USER", "")
 SCRATCH_PASS = os.getenv("SCRATCH_PASS", "")
-RENDER_URL = os.getenv("RENDER_URL", "")  # ex: https://ton-app.onrender.com
+RENDER_URL = os.getenv("RENDER_URL", "")
 
 genai.configure(api_key=os.getenv("GEMINI_KEY"))
 model = genai.GenerativeModel('gemini-3-flash-preview')
@@ -21,6 +21,7 @@ model = genai.GenerativeModel('gemini-3-flash-preview')
 logs = []
 conn = None
 status = "Démarrage..."
+cycle_count = 0
 
 def log(msg):
     t = time.strftime("%H:%M:%S")
@@ -47,18 +48,48 @@ def decode(s):
     return t
 
 def lire_variable():
+    """Lit la variable cloud — gère les 2 formats de l'API"""
+    global cycle_count
+    cycle_count += 1
+
     try:
         url = f"https://clouddata.scratch.mit.edu/logs?projectid={PROJECT_ID}&limit=5&offset=0"
         r = http_requests.get(url, timeout=10)
-        for line in r.text.strip().split('\n'):
-            try:
-                d = json.loads(line)
-                if 'Messages sent' in d.get('name', ''):
-                    return str(d.get('value', '0')).split('.')[0]
-            except:
-                pass
-    except:
-        pass
+        texte = r.text.strip()
+
+        # Debug toutes les 10 lectures
+        if cycle_count % 10 == 1:
+            log(f"🔍 API brut ({len(texte)} chars) : {texte[:200]}")
+
+        # FORMAT 1 : Tableau JSON [{...},{...}]
+        if texte.startswith('['):
+            data = json.loads(texte)
+            for entry in data:
+                if 'Messages sent' in entry.get('name', ''):
+                    val = str(entry.get('value', '0')).split('.')[0]
+                    if cycle_count % 10 == 1:
+                        log(f"🔍 Valeur trouvée (JSON array) : {val}")
+                    return val
+
+        # FORMAT 2 : JSON ligne par ligne
+        else:
+            for line in texte.split('\n'):
+                try:
+                    d = json.loads(line)
+                    if 'Messages sent' in d.get('name', ''):
+                        val = str(d.get('value', '0')).split('.')[0]
+                        if cycle_count % 10 == 1:
+                            log(f"🔍 Valeur trouvée (ligne) : {val}")
+                        return val
+                except:
+                    pass
+
+        if cycle_count % 10 == 1:
+            log(f"⚠️ Pas de 'Messages sent' trouvé dans la réponse")
+
+    except Exception as e:
+        log(f"❌ Erreur lecture API : {e}")
+
     return "0"
 
 def do_connect():
@@ -75,32 +106,35 @@ def do_connect():
         return False
 
 # ══════════════════════════════
-# BOUCLE IA (tourne toute seule)
+# BOUCLE IA
 # ══════════════════════════════
 
 def boucle_ia():
     global status
     time.sleep(2)
 
-    # Connexion automatique avec retry
     for tentative in range(5):
         if do_connect():
             break
-        log(f"🔄 Nouvelle tentative dans 10s... ({tentative+1}/5)")
+        log(f"🔄 Tentative {tentative+1}/5...")
         time.sleep(10)
 
     if not conn:
         status = "❌ Connexion impossible"
-        log("❌ Abandon après 5 tentatives")
         return
 
     status = "✅ En ligne"
     last = ""
-    log("🔄 Boucle IA démarrée — tout est automatique !")
+    log("🔄 Boucle IA démarrée !")
 
     while True:
         try:
             val = lire_variable()
+
+            # Log la valeur quand elle change
+            if val != "0" and val != last:
+                log(f"📡 Nouvelle valeur détectée : {val}")
+                log(f"📡 Premier caractère : '{val[0]}' — commence par 1 ? {val.startswith('1')}")
 
             if val.startswith("1") and len(val) > 2 and val != last:
                 last = val
@@ -118,14 +152,20 @@ def boucle_ia():
                 log(f"🤖 Réponse : {reponse}")
 
                 encoded = encode(reponse)
+                log(f"📤 Encodé : {encoded}")
+
                 conn.set_var("Messages sent", encoded)
-                log(f"📤 Envoyé à Scratch !")
+                log(f"✅ Envoyé à Scratch !")
                 status = "✅ En ligne"
+
+            elif val.startswith("2") and val != last:
+                # C'est une réponse déjà envoyée, on ignore
+                last = val
 
             time.sleep(2)
 
         except Exception as e:
-            log(f"❌ Erreur : {e}")
+            log(f"❌ Erreur boucle : {e}")
             status = "🔄 Reconnexion..."
             time.sleep(5)
             do_connect()
@@ -133,7 +173,7 @@ def boucle_ia():
                 status = "✅ En ligne"
 
 # ══════════════════════════════
-# SELF-PING (empêche Render de couper)
+# SELF-PING
 # ══════════════════════════════
 
 def self_ping():
@@ -142,15 +182,12 @@ def self_ping():
         try:
             if RENDER_URL:
                 http_requests.get(RENDER_URL, timeout=10)
-                log("🏓 Self-ping OK")
-            else:
-                log("⚠️ RENDER_URL non défini — pas de self-ping")
         except:
             pass
-        time.sleep(300)  # toutes les 5 minutes
+        time.sleep(300)
 
 # ══════════════════════════════
-# PAGE WEB (juste pour vérifier)
+# PAGE WEB
 # ══════════════════════════════
 
 HTML = """
@@ -170,13 +207,14 @@ h1 { font-size: 18px; margin-bottom: 15px; }
         line-height: 1.6; }
 .ok { color: green; font-weight: bold; }
 .err { color: red; font-weight: bold; }
+.debug { color: #666; }
 p { font-size: 11px; color: #888; margin: 8px 0; }
 </style>
 </head>
 <body>
 <h1>🤖 IA Scratch</h1>
 <div id="status">...</div>
-<p>Tout est automatique. Tu n'as pas besoin de garder cette page ouverte.</p>
+<p>Tout est automatique. Ouvre Scratch, appuie ESPACE, pose ta question.</p>
 <div id="logs"></div>
 <script>
 function r(){
@@ -184,14 +222,17 @@ function r(){
         document.getElementById('status').innerText=d.status;
         let h='';
         d.logs.forEach(l=>{
-            let c=l.includes('✅')?'ok':l.includes('❌')?'err':'';
+            let c='';
+            if(l.includes('✅'))c='ok';
+            else if(l.includes('❌'))c='err';
+            else if(l.includes('🔍'))c='debug';
             h+='<div class="'+c+'">'+l+'</div>';
         });
         document.getElementById('logs').innerHTML=h;
         document.getElementById('logs').scrollTop=99999;
     });
 }
-setInterval(r,3000);r();
+setInterval(r,2000);r();
 </script>
 </body>
 </html>
@@ -205,7 +246,7 @@ def home():
 def api():
     return jsonify(status=status, logs=logs)
 
-# ── Démarrage automatique ──
+# ── Démarrage ──
 threading.Thread(target=boucle_ia, daemon=True).start()
 threading.Thread(target=self_ping, daemon=True).start()
 

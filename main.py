@@ -51,8 +51,13 @@ def encode(text):
 def decode(s):
     s = str(s)[1:]
     t = ""
+    if len(s) % 2 != 0:
+        s = s[:-1]
     for i in range(0, len(s), 2):
-        idx = int(s[i:i+2])
+        try:
+            idx = int(s[i:i+2])
+        except:
+            continue
         if 1 <= idx <= len(CHARS):
             t += CHARS[idx - 1]
     return t
@@ -217,7 +222,7 @@ def boucle_ia():
         try:
             val = lire_variable()
 
-            if val.startswith("1") and len(val) > 2 and val != last_val:
+            if val.startswith("1") and len(val) > 4 and val != last_val:
                 last_val = val
                 status = "🤖 Traitement..."
                 traiter_message(val)

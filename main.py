@@ -33,11 +33,7 @@ last_val = ""
 ia_thread = None
 working_model = None
 
-# ══════════════════════════════
-# MÉMOIRE
-# ══════════════════════════════
 etat = "attente"
-# etats : "attente" → "questions_generees" → "attend_ok" → "attend_reponse" → "attend_ok"...
 memoire = {
     "niveau": "",
     "sujet": "",
@@ -47,7 +43,7 @@ memoire = {
     "timestamp": 0
 }
 
-TIMEOUT = 120  # 2 minutes
+TIMEOUT = 120
 
 def log(msg):
     t = time.strftime("%H:%M:%S")
@@ -59,7 +55,6 @@ def log(msg):
 
 def encode(text):
     try:
-        # Supprimer les espaces au début pour éviter le bug du "0"
         text = text.lower().strip()
         r = "2"
         for c in text:
@@ -189,13 +184,11 @@ def reset_memoire():
     log("🧹 Mémoire effacée")
 
 def est_nouvelle_session(texte):
-    """Détecte si le message est niveau+sujet (1er char = chiffre, reste = texte)"""
     if len(texte) < 2:
         return False
     return texte[0].isdigit() and not texte[1:].strip().isdigit()
 
 def verifier_timeout():
-    """Vérifie si la session a expiré"""
     if memoire["timestamp"] > 0:
         elapsed = time.time() - memoire["timestamp"]
         if elapsed > TIMEOUT:
@@ -205,13 +198,11 @@ def verifier_timeout():
     return False
 
 def envoyer_question_actuelle():
-    """Envoie la question courante à Scratch"""
     idx = memoire["index"]
     questions = memoire["questions"]
 
     if idx >= len(questions):
         log("🎉 Toutes les questions ont été posées !")
-        # Envoyer "fin" à Scratch
         encoded = encode("fin")
         envoyer_scratch(encoded)
         reset_memoire()
@@ -221,7 +212,7 @@ def envoyer_question_actuelle():
     memoire["question_actuelle"] = question
     memoire["timestamp"] = time.time()
 
-    log(f"📝 Question {idx+1}/10 : '{question}'")
+    log(f"📝 Question {idx+1}/{len(questions)} : '{question}'")
 
     encoded = encode(question)
     log(f"🔢 Encodée : {encoded}")
@@ -232,10 +223,6 @@ def envoyer_question_actuelle():
     else:
         log("❌ Échec envoi question")
     return ok
-
-# ══════════════════════════════
-# TRAITEMENT
-# ══════════════════════════════
 
 def traiter_message(val):
     global etat, memoire
@@ -252,16 +239,12 @@ def traiter_message(val):
 
     log(f"📖 Décodé : '{texte}'")
 
-    # ── Détection nouvelle session ──
     if est_nouvelle_session(texte) and etat != "attente":
         log("🔄 Nouvelle session détectée ! Reset...")
         reset_memoire()
 
     verifier_timeout()
 
-    # ════════════════════════════
-    # ÉTAT : ATTENTE (niveau + sujet)
-    # ════════════════════════════
     if etat == "attente":
         if not est_nouvelle_session(texte):
             log("⚠️ Message ignoré (pas un niveau+sujet)")
@@ -294,15 +277,11 @@ def traiter_message(val):
 
         log(f"🤖 Réponse brute :\n{reponse}")
 
-        # Parser les 10 questions
         lignes = [l.strip() for l in reponse.split('\n') if l.strip() and len(l.strip()) > 5]
-        # Nettoyer les numéros au début ("1. ", "1) ", etc.)
         questions_clean = []
         for l in lignes:
-            # Supprimer numérotation
             while l and (l[0].isdigit() or l[0] in '.)-:'):
                 l = l[1:].strip()
-            # Nettoyer caractères non supportés
             l_clean = ''.join(c for c in l.lower() if c in CHARS).strip()
             if l_clean and len(l_clean) > 5:
                 questions_clean.append(l_clean)
@@ -312,7 +291,6 @@ def traiter_message(val):
             log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return False
 
-        # Garder max 10
         questions_clean = questions_clean[:10]
         log(f"✅ {len(questions_clean)} questions générées :")
         for i, q in enumerate(questions_clean):
@@ -325,19 +303,15 @@ def traiter_message(val):
         memoire["timestamp"] = time.time()
         etat = "attend_ok"
 
-        # Envoyer la première question directement
         envoyer_question_actuelle()
         etat = "attend_reponse"
 
         log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         return True
 
-    # ════════════════════════════
-    # ÉTAT : ATTEND OK (Scratch dit "ok" pour recevoir la question suivante)
-    # ════════════════════════════
     elif etat == "attend_ok":
         if texte.strip() == "ok":
-            log("👍 OK reçu ! Envoi de la question suivante...")
+            log("👍 OK reçu ! Envoi question suivante...")
             memoire["timestamp"] = time.time()
             ok = envoyer_question_actuelle()
             if ok:
@@ -346,16 +320,12 @@ def traiter_message(val):
             return ok
         else:
             log(f"⚠️ Attendait 'ok', reçu '{texte}'")
-            # Peut-être une nouvelle session ?
             if est_nouvelle_session(texte):
                 reset_memoire()
                 return traiter_message(val)
             log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return False
 
-    # ════════════════════════════
-    # ÉTAT : ATTEND RÉPONSE DE L'ÉLÈVE
-    # ════════════════════════════
     elif etat == "attend_reponse":
         reponse_eleve = texte
         log(f"📝 Réponse élève : '{reponse_eleve}'")
@@ -397,7 +367,6 @@ def traiter_message(val):
         if ok:
             log(f"✅ Envoyé : {resultat}")
 
-        # Passer à la question suivante
         memoire["index"] += 1
         memoire["timestamp"] = time.time()
 
@@ -410,10 +379,6 @@ def traiter_message(val):
 
         log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         return ok
-
-# ══════════════════════════════
-# BOUCLE
-# ══════════════════════════════
 
 def boucle_ia():
     global status, last_val
@@ -437,10 +402,16 @@ def boucle_ia():
     status = "✅ En ligne"
     log("✅ DevoirGPT v2 prêt !")
 
+    derniere_reconnexion = time.time()
+
     while True:
         try:
-            verifier_timeout()
+            if time.time() - derniere_reconnexion > 90:
+                log("🔄 Reconnexion préventive...")
+                do_connect()
+                derniere_reconnexion = time.time()
 
+            verifier_timeout()
             val = lire_variable()
 
             if val.startswith("1") and len(val) > 4 and val != last_val:
@@ -451,6 +422,7 @@ def boucle_ia():
                 except Exception as e:
                     log(f"❌ Erreur traitement : {e}")
                     do_connect()
+                    derniere_reconnexion = time.time()
                 status = f"✅ En ligne ({etat})"
             elif val != last_val:
                 last_val = val
@@ -462,6 +434,7 @@ def boucle_ia():
             status = "🔄 Reconnexion..."
             time.sleep(5)
             do_connect()
+            derniere_reconnexion = time.time()
             if conn:
                 status = "✅ En ligne"
 
@@ -475,14 +448,14 @@ def verifier_thread():
     return "actif"
 
 def self_ping():
-    time.sleep(30)
+    time.sleep(10)
     while True:
         try:
             if RENDER_URL:
                 http_requests.get(f"{RENDER_URL}/tick", timeout=10)
         except:
             pass
-        time.sleep(240)
+        time.sleep(25)
 
 HTML = """
 <!DOCTYPE html>
@@ -517,7 +490,7 @@ p { font-size: 11px; color: #888; margin: 8px 0; }
 <div id="status">...</div>
 <div id="thread">...</div>
 <div id="mem">...</div>
-<p>Scratch envoie niveau+sujet → 10 questions générées → l'élève répond → vrai/faux</p>
+<p>Scratch envoie niveau+sujet → 10 questions → l'élève répond → vrai/faux</p>
 <div id="logs"></div>
 <script>
 function r(){

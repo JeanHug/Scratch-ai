@@ -34,15 +34,20 @@ ia_thread = None
 working_model = None
 
 # ══════════════════════════════
-# MÉMOIRE DEVOIRGPT
+# MÉMOIRE
 # ══════════════════════════════
-etat = "attente"      # "attente" → attend niveau+sujet
-                       # "question_posee" → attend la réponse de l'élève
+etat = "attente"
+# etats : "attente" → "questions_generees" → "attend_ok" → "attend_reponse" → "attend_ok"...
 memoire = {
     "niveau": "",
     "sujet": "",
-    "question": ""
+    "questions": [],
+    "index": 0,
+    "question_actuelle": "",
+    "timestamp": 0
 }
+
+TIMEOUT = 120  # 2 minutes
 
 def log(msg):
     t = time.strftime("%H:%M:%S")
@@ -54,8 +59,10 @@ def log(msg):
 
 def encode(text):
     try:
+        # Supprimer les espaces au début pour éviter le bug du "0"
+        text = text.lower().strip()
         r = "2"
-        for c in text.lower():
+        for c in text:
             if c in CHARS:
                 r += str(CHARS.index(c) + 1).zfill(2)
         return r
@@ -171,118 +178,200 @@ def demander_ia(prompt_complet):
 def reset_memoire():
     global etat, memoire
     etat = "attente"
-    memoire = {"niveau": "", "sujet": "", "question": ""}
-    log("🧹 Mémoire effacée — retour en attente")
+    memoire = {
+        "niveau": "",
+        "sujet": "",
+        "questions": [],
+        "index": 0,
+        "question_actuelle": "",
+        "timestamp": 0
+    }
+    log("🧹 Mémoire effacée")
+
+def est_nouvelle_session(texte):
+    """Détecte si le message est niveau+sujet (1er char = chiffre, reste = texte)"""
+    if len(texte) < 2:
+        return False
+    return texte[0].isdigit() and not texte[1:].strip().isdigit()
+
+def verifier_timeout():
+    """Vérifie si la session a expiré"""
+    if memoire["timestamp"] > 0:
+        elapsed = time.time() - memoire["timestamp"]
+        if elapsed > TIMEOUT:
+            log(f"⏰ Timeout ({int(elapsed)}s > {TIMEOUT}s)")
+            reset_memoire()
+            return True
+    return False
+
+def envoyer_question_actuelle():
+    """Envoie la question courante à Scratch"""
+    idx = memoire["index"]
+    questions = memoire["questions"]
+
+    if idx >= len(questions):
+        log("🎉 Toutes les questions ont été posées !")
+        # Envoyer "fin" à Scratch
+        encoded = encode("fin")
+        envoyer_scratch(encoded)
+        reset_memoire()
+        return False
+
+    question = questions[idx].strip()
+    memoire["question_actuelle"] = question
+    memoire["timestamp"] = time.time()
+
+    log(f"📝 Question {idx+1}/10 : '{question}'")
+
+    encoded = encode(question)
+    log(f"🔢 Encodée : {encoded}")
+
+    ok = envoyer_scratch(encoded)
+    if ok:
+        log(f"✅ Question {idx+1} envoyée !")
+    else:
+        log("❌ Échec envoi question")
+    return ok
 
 # ══════════════════════════════
-# TRAITEMENT MESSAGE
+# TRAITEMENT
 # ══════════════════════════════
 
 def traiter_message(val):
     global etat, memoire
 
     log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    log(f"📡 Reçu brut : {val}")
-    log(f"📡 État actuel : {etat}")
+    log(f"📡 Reçu : {val}")
+    log(f"📡 État : {etat}")
 
-    texte_complet = decode(val)
-    if not texte_complet:
-        log("❌ Décodage vide !")
+    texte = decode(val)
+    if not texte:
+        log("❌ Décodage vide")
         log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         return False
 
-    log(f"📖 Décodé : '{texte_complet}'")
+    log(f"📖 Décodé : '{texte}'")
+
+    # ── Détection nouvelle session ──
+    if est_nouvelle_session(texte) and etat != "attente":
+        log("🔄 Nouvelle session détectée ! Reset...")
+        reset_memoire()
+
+    verifier_timeout()
 
     # ════════════════════════════
-    # MODE 1 : On attend niveau + sujet
+    # ÉTAT : ATTENTE (niveau + sujet)
     # ════════════════════════════
     if etat == "attente":
-        # Premier caractère = niveau, reste = sujet
-        niveau = texte_complet[0]
-        sujet = texte_complet[1:].strip()
+        if not est_nouvelle_session(texte):
+            log("⚠️ Message ignoré (pas un niveau+sujet)")
+            log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            return False
+
+        niveau = texte[0]
+        sujet = texte[1:].strip()
 
         log(f"📚 Niveau : {niveau}ème")
         log(f"📚 Sujet : {sujet}")
 
-        if not sujet:
-            log("❌ Sujet vide !")
-            log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            return False
-
-        # Demander une question à l'IA
         prompt = (
             f"Tu es un professeur. "
-            f"Génère UNE SEULE question courte et précise pour un élève de {niveau}ème "
+            f"Génère exactement 10 questions courtes et variées pour un élève de {niveau}ème "
             f"sur le sujet : {sujet}. "
-            f"Réponds UNIQUEMENT par la question, rien d'autre. "
-            f"En français. Maximum 100 caractères."
+            f"Écris UNE question par ligne. "
+            f"Chaque question doit faire maximum 80 caractères. "
+            f"Pas de numérotation. Pas de tiret. Juste la question. "
+            f"En français."
         )
 
-        log("🤖 Demande d'une question à l'IA...")
-        reponse_brute = demander_ia(prompt)
+        log("🤖 Génération de 10 questions...")
+        reponse = demander_ia(prompt)
 
-        if not reponse_brute:
+        if not reponse:
             log("❌ Pas de réponse IA")
             log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return False
 
-        log(f"🤖 Question brute : '{reponse_brute}'")
+        log(f"🤖 Réponse brute :\n{reponse}")
 
-        question_clean = ''.join(
-            c for c in reponse_brute.lower() if c in CHARS
-        )[:120]
-        log(f"🧹 Question nettoyée : '{question_clean}'")
+        # Parser les 10 questions
+        lignes = [l.strip() for l in reponse.split('\n') if l.strip() and len(l.strip()) > 5]
+        # Nettoyer les numéros au début ("1. ", "1) ", etc.)
+        questions_clean = []
+        for l in lignes:
+            # Supprimer numérotation
+            while l and (l[0].isdigit() or l[0] in '.)-:'):
+                l = l[1:].strip()
+            # Nettoyer caractères non supportés
+            l_clean = ''.join(c for c in l.lower() if c in CHARS).strip()
+            if l_clean and len(l_clean) > 5:
+                questions_clean.append(l_clean)
 
-        if not question_clean:
-            log("⚠️ Question vide après nettoyage")
+        if len(questions_clean) < 1:
+            log("❌ Aucune question valide générée")
             log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return False
 
-        # Sauvegarder en mémoire
+        # Garder max 10
+        questions_clean = questions_clean[:10]
+        log(f"✅ {len(questions_clean)} questions générées :")
+        for i, q in enumerate(questions_clean):
+            log(f"   {i+1}. {q}")
+
         memoire["niveau"] = niveau
         memoire["sujet"] = sujet
-        memoire["question"] = question_clean
-        etat = "question_posee"
+        memoire["questions"] = questions_clean
+        memoire["index"] = 0
+        memoire["timestamp"] = time.time()
+        etat = "attend_ok"
 
-        log(f"💾 Mémoire : niveau={niveau}, sujet={sujet}")
-        log(f"💾 Question mémorisée : '{question_clean}'")
-
-        # Envoyer la question à Scratch
-        encoded = encode(question_clean)
-        log(f"🔢 Encodée : {encoded}")
-        log("📤 Envoi de la question à Scratch...")
-
-        ok = envoyer_scratch(encoded)
-        if ok:
-            log("✅ Question envoyée ! En attente de la réponse de l'élève...")
-        else:
-            log("❌ Échec envoi")
-            reset_memoire()
+        # Envoyer la première question directement
+        envoyer_question_actuelle()
+        etat = "attend_reponse"
 
         log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        return ok
+        return True
 
     # ════════════════════════════
-    # MODE 2 : On attend la réponse de l'élève
+    # ÉTAT : ATTEND OK (Scratch dit "ok" pour recevoir la question suivante)
     # ════════════════════════════
-    elif etat == "question_posee":
-        reponse_eleve = texte_complet
-        log(f"📝 Réponse de l'élève : '{reponse_eleve}'")
-        log(f"💾 Question était : '{memoire['question']}'")
-        log(f"💾 Niveau : {memoire['niveau']}ème | Sujet : {memoire['sujet']}")
+    elif etat == "attend_ok":
+        if texte.strip() == "ok":
+            log("👍 OK reçu ! Envoi de la question suivante...")
+            memoire["timestamp"] = time.time()
+            ok = envoyer_question_actuelle()
+            if ok:
+                etat = "attend_reponse"
+            log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            return ok
+        else:
+            log(f"⚠️ Attendait 'ok', reçu '{texte}'")
+            # Peut-être une nouvelle session ?
+            if est_nouvelle_session(texte):
+                reset_memoire()
+                return traiter_message(val)
+            log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            return False
 
-        # Demander à l'IA si c'est vrai ou faux
+    # ════════════════════════════
+    # ÉTAT : ATTEND RÉPONSE DE L'ÉLÈVE
+    # ════════════════════════════
+    elif etat == "attend_reponse":
+        reponse_eleve = texte
+        log(f"📝 Réponse élève : '{reponse_eleve}'")
+        log(f"💾 Question : '{memoire['question_actuelle']}'")
+
         prompt = (
             f"Voici une question posée à un élève de {memoire['niveau']}ème "
             f"sur le sujet {memoire['sujet']} : "
-            f"{memoire['question']} "
+            f"{memoire['question_actuelle']} "
             f"Voici la réponse de l'élève : {reponse_eleve} "
             f"Cette réponse est-elle correcte ? "
             f"Réponds UNIQUEMENT par le mot vrai ou le mot faux, "
             f"rien d'autre, pas de majuscule, pas de ponctuation."
         )
 
-        log("🤖 Vérification par l'IA...")
+        log("🤖 Vérification...")
         reponse_brute = demander_ia(prompt)
 
         if not reponse_brute:
@@ -291,39 +380,39 @@ def traiter_message(val):
             log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return False
 
-        log(f"🤖 Réponse brute : '{reponse_brute}'")
+        log(f"🤖 Réponse : '{reponse_brute}'")
 
-        # Nettoyer : garder juste "vrai" ou "faux"
         reponse_lower = reponse_brute.lower().strip()
         if "vrai" in reponse_lower:
             resultat = "vrai"
         elif "faux" in reponse_lower:
             resultat = "faux"
         else:
-            resultat = ''.join(
-                c for c in reponse_lower if c in CHARS
-            )[:120]
+            resultat = ''.join(c for c in reponse_lower if c in CHARS).strip()[:120]
 
         log(f"✏️ Résultat : '{resultat}'")
 
-        # Envoyer à Scratch
         encoded = encode(resultat)
-        log(f"🔢 Encodé : {encoded}")
-        log("📤 Envoi du résultat à Scratch...")
-
         ok = envoyer_scratch(encoded)
         if ok:
-            log(f"✅ Résultat envoyé : {resultat}")
-        else:
-            log("❌ Échec envoi")
+            log(f"✅ Envoyé : {resultat}")
 
-        # Remettre à zéro
-        reset_memoire()
+        # Passer à la question suivante
+        memoire["index"] += 1
+        memoire["timestamp"] = time.time()
+
+        if memoire["index"] >= len(memoire["questions"]):
+            log("🎉 10/10 questions terminées !")
+            reset_memoire()
+        else:
+            etat = "attend_ok"
+            log(f"⏳ En attente de 'ok' pour question {memoire['index']+1}")
+
         log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         return ok
 
 # ══════════════════════════════
-# BOUCLE PRINCIPALE
+# BOUCLE
 # ══════════════════════════════
 
 def boucle_ia():
@@ -346,15 +435,17 @@ def boucle_ia():
     reset_memoire()
 
     status = "✅ En ligne"
-    log("✅ DevoirGPT prêt !")
+    log("✅ DevoirGPT v2 prêt !")
 
     while True:
         try:
+            verifier_timeout()
+
             val = lire_variable()
 
             if val.startswith("1") and len(val) > 4 and val != last_val:
                 last_val = val
-                status = f"🤖 Traitement ({etat})..."
+                status = f"🤖 {etat} ({memoire['index']+1}/10)"
                 try:
                     traiter_message(val)
                 except Exception as e:
@@ -393,10 +484,6 @@ def self_ping():
             pass
         time.sleep(240)
 
-# ══════════════════════════════
-# PAGE WEB
-# ══════════════════════════════
-
 HTML = """
 <!DOCTYPE html>
 <html>
@@ -411,8 +498,8 @@ h1 { font-size: 18px; margin-bottom: 15px; }
           margin-bottom: 5px; text-align: center; }
 #thread { font-size: 12px; padding: 5px; border: 1px solid #ccc;
           margin-bottom: 5px; text-align: center; color: #666; }
-#mem { font-size: 12px; padding: 5px; border: 1px solid #ccc;
-       margin-bottom: 10px; text-align: center; color: #336; }
+#mem { font-size: 11px; padding: 5px; border: 1px solid #ccc;
+       margin-bottom: 10px; color: #336; line-height: 1.5; }
 #logs { border: 1px solid #ccc; padding: 8px; height: 500px;
         overflow-y: auto; font-size: 11px; background: #f9f9f9;
         line-height: 1.6; }
@@ -426,11 +513,11 @@ p { font-size: 11px; color: #888; margin: 8px 0; }
 </style>
 </head>
 <body>
-<h1>📚 DevoirGPT</h1>
+<h1>📚 DevoirGPT v2</h1>
 <div id="status">...</div>
 <div id="thread">...</div>
 <div id="mem">...</div>
-<p>Scratch envoie : niveau + sujet → IA génère une question → l'élève répond → IA corrige</p>
+<p>Scratch envoie niveau+sujet → 10 questions générées → l'élève répond → vrai/faux</p>
 <div id="logs"></div>
 <script>
 function r(){
@@ -438,18 +525,20 @@ function r(){
         document.getElementById('status').innerText=d.status;
         document.getElementById('thread').innerText=
             'Thread: '+d.thread+' | Modèle: '+(d.model||'aucun');
-        document.getElementById('mem').innerText=
-            'État: '+d.etat+' | Niveau: '+(d.memoire.niveau||'-')+
-            ' | Sujet: '+(d.memoire.sujet||'-')+
-            ' | Question: '+(d.memoire.question||'-').substring(0,40);
+        let m=d.memoire;
+        document.getElementById('mem').innerHTML=
+            'État: <b>'+d.etat+'</b> | Niveau: '+(m.niveau||'-')+
+            'ème | Sujet: '+(m.sujet||'-')+
+            '<br>Question '+(m.index+1)+'/'+m.questions.length+
+            ' : '+(m.question_actuelle||'-');
         let h='';
         d.logs.forEach(l=>{
             let c='';
-            if(l.includes('✅'))c='ok';
+            if(l.includes('✅')||l.includes('🎉'))c='ok';
             else if(l.includes('❌'))c='err';
-            else if(l.includes('ÉTAPE')||l.includes('📡')||l.includes('📖'))c='step';
+            else if(l.includes('📡')||l.includes('📖')||l.includes('📝'))c='step';
             else if(l.includes('━'))c='sep';
-            else if(l.includes('⚠'))c='warn';
+            else if(l.includes('⚠')||l.includes('⏰'))c='warn';
             else if(l.includes('💾'))c='mem';
             h+='<div class="'+c+'">'+l+'</div>';
         });
@@ -471,12 +560,8 @@ def home():
 def api():
     t = verifier_thread()
     return jsonify(
-        status=status,
-        logs=logs,
-        thread=t,
-        model=working_model,
-        etat=etat,
-        memoire=memoire
+        status=status, logs=logs, thread=t, model=working_model,
+        etat=etat, memoire=memoire
     )
 
 @app.route('/tick')

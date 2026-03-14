@@ -33,6 +33,17 @@ last_val = ""
 ia_thread = None
 working_model = None
 
+# ══════════════════════════════
+# MÉMOIRE DEVOIRGPT
+# ══════════════════════════════
+etat = "attente"      # "attente" → attend niveau+sujet
+                       # "question_posee" → attend la réponse de l'élève
+memoire = {
+    "niveau": "",
+    "sujet": "",
+    "question": ""
+}
+
 def log(msg):
     t = time.strftime("%H:%M:%S")
     entry = f"[{t}] {msg}"
@@ -42,20 +53,36 @@ def log(msg):
     print(entry, flush=True)
 
 def encode(text):
-    r = "2"
-    for c in text.lower():
-        if c in CHARS:
-            r += str(CHARS.index(c) + 1).zfill(2)
-    return r
+    try:
+        r = "2"
+        for c in text.lower():
+            if c in CHARS:
+                r += str(CHARS.index(c) + 1).zfill(2)
+        return r
+    except Exception as e:
+        log(f"❌ Erreur encode : {e}")
+        return "2"
 
 def decode(s):
-    s = str(s)[1:]
-    t = ""
-    for i in range(0, len(s), 2):
-        idx = int(s[i:i+2])
-        if 1 <= idx <= len(CHARS):
-            t += CHARS[idx - 1]
-    return t
+    try:
+        s = str(s)
+        if len(s) < 3:
+            return ""
+        s = s[1:]
+        if len(s) % 2 != 0:
+            s = s[:-1]
+        t = ""
+        for i in range(0, len(s), 2):
+            try:
+                idx = int(s[i:i+2])
+                if 1 <= idx <= len(CHARS):
+                    t += CHARS[idx - 1]
+            except:
+                continue
+        return t
+    except Exception as e:
+        log(f"❌ Erreur decode : {e}")
+        return ""
 
 def lire_variable():
     try:
@@ -82,9 +109,16 @@ def lire_variable():
 def do_connect():
     global conn
     try:
+        if conn:
+            try:
+                conn.disconnect()
+            except:
+                pass
+            conn = None
         log("🔌 Connexion Scratch...")
         s = scratch.login(SCRATCH_USER, SCRATCH_PASS)
         conn = s.connect_cloud(PROJECT_ID)
+        time.sleep(1)
         log("✅ Connecté !")
         return True
     except Exception as e:
@@ -92,100 +126,201 @@ def do_connect():
         conn = None
         return False
 
-# ══════════════════════════════
-# IA AVEC FALLBACK
-# ══════════════════════════════
+def envoyer_scratch(valeur):
+    global conn
+    for tentative in range(3):
+        try:
+            if not conn:
+                do_connect()
+            if conn:
+                conn.set_var("Messages sent", str(valeur))
+                return True
+        except Exception as e:
+            log(f"❌ Envoi tentative {tentative+1} : {e}")
+            conn = None
+            time.sleep(2)
+            do_connect()
+    return False
 
-def demander_ia(question):
+def demander_ia(prompt_complet):
     global working_model
 
-    # Si un modèle marchait avant, l'essayer en premier
     if working_model:
         try:
             m = genai.GenerativeModel(working_model)
-            res = m.generate_content(
-                "Réponds en français."
-                "pas d'émoji, pas de markdown, pas de majuscules : " + question
-            )
+            res = m.generate_content(prompt_complet)
             log(f"✅ IA OK ({working_model})")
             return res.text.strip()
         except Exception as e:
             log(f"⚠️ {working_model} a planté : {e}")
             working_model = None
 
-    # Essayer chaque modèle
     for model_name in MODELS:
         try:
             log(f"🤖 Essai {model_name}...")
             m = genai.GenerativeModel(model_name)
-            res = m.generate_content(
-                "Réponds en français, "
-                "pas d'émoji, pas de markdown, pas de majuscules : " + question
-            )
+            res = m.generate_content(prompt_complet)
             log(f"✅ IA OK avec {model_name}")
             working_model = model_name
             return res.text.strip()
         except Exception as e:
             log(f"❌ {model_name} échoué : {e}")
 
-    log("❌ TOUS LES MODÈLES ONT ÉCHOUÉ")
     return None
 
+def reset_memoire():
+    global etat, memoire
+    etat = "attente"
+    memoire = {"niveau": "", "sujet": "", "question": ""}
+    log("🧹 Mémoire effacée — retour en attente")
+
 # ══════════════════════════════
-# TRAITEMENT D'UN MESSAGE
+# TRAITEMENT MESSAGE
 # ══════════════════════════════
 
 def traiter_message(val):
-    global conn
+    global etat, memoire
 
     log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    log(f"📡 ÉTAPE 1 — Reçu : {val}")
+    log(f"📡 Reçu brut : {val}")
+    log(f"📡 État actuel : {etat}")
 
-    question = decode(val)
-    log(f"📖 ÉTAPE 2 — Décodé : '{question}'")
-
-    log("🤖 ÉTAPE 3 — Envoi à l'IA...")
-    reponse_brute = demander_ia(question)
-
-    if not reponse_brute:
-        log("❌ Pas de réponse IA")
+    texte_complet = decode(val)
+    if not texte_complet:
+        log("❌ Décodage vide !")
         log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         return False
 
-    log(f"🤖 ÉTAPE 4 — Réponse brute : '{reponse_brute}'")
+    log(f"📖 Décodé : '{texte_complet}'")
 
-    reponse_clean = ''.join(
-        c for c in reponse_brute.lower() if c in CHARS
-    )[:120]
-    log(f"🧹 ÉTAPE 5 — Nettoyée : '{reponse_clean}'")
+    # ════════════════════════════
+    # MODE 1 : On attend niveau + sujet
+    # ════════════════════════════
+    if etat == "attente":
+        # Premier caractère = niveau, reste = sujet
+        niveau = texte_complet[0]
+        sujet = texte_complet[1:].strip()
 
-    if not reponse_clean:
-        log("⚠️ Réponse vide après nettoyage")
+        log(f"📚 Niveau : {niveau}ème")
+        log(f"📚 Sujet : {sujet}")
+
+        if not sujet:
+            log("❌ Sujet vide !")
+            log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            return False
+
+        # Demander une question à l'IA
+        prompt = (
+            f"Tu es un professeur. "
+            f"Génère UNE SEULE question courte et précise pour un élève de {niveau}ème "
+            f"sur le sujet : {sujet}. "
+            f"Réponds UNIQUEMENT par la question, rien d'autre. "
+            f"En français. Maximum 100 caractères."
+        )
+
+        log("🤖 Demande d'une question à l'IA...")
+        reponse_brute = demander_ia(prompt)
+
+        if not reponse_brute:
+            log("❌ Pas de réponse IA")
+            log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            return False
+
+        log(f"🤖 Question brute : '{reponse_brute}'")
+
+        question_clean = ''.join(
+            c for c in reponse_brute.lower() if c in CHARS
+        )[:120]
+        log(f"🧹 Question nettoyée : '{question_clean}'")
+
+        if not question_clean:
+            log("⚠️ Question vide après nettoyage")
+            log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            return False
+
+        # Sauvegarder en mémoire
+        memoire["niveau"] = niveau
+        memoire["sujet"] = sujet
+        memoire["question"] = question_clean
+        etat = "question_posee"
+
+        log(f"💾 Mémoire : niveau={niveau}, sujet={sujet}")
+        log(f"💾 Question mémorisée : '{question_clean}'")
+
+        # Envoyer la question à Scratch
+        encoded = encode(question_clean)
+        log(f"🔢 Encodée : {encoded}")
+        log("📤 Envoi de la question à Scratch...")
+
+        ok = envoyer_scratch(encoded)
+        if ok:
+            log("✅ Question envoyée ! En attente de la réponse de l'élève...")
+        else:
+            log("❌ Échec envoi")
+            reset_memoire()
+
         log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        return False
+        return ok
 
-    encoded = encode(reponse_clean)
-    log(f"🔢 ÉTAPE 6 — Encodée : {encoded}")
+    # ════════════════════════════
+    # MODE 2 : On attend la réponse de l'élève
+    # ════════════════════════════
+    elif etat == "question_posee":
+        reponse_eleve = texte_complet
+        log(f"📝 Réponse de l'élève : '{reponse_eleve}'")
+        log(f"💾 Question était : '{memoire['question']}'")
+        log(f"💾 Niveau : {memoire['niveau']}ème | Sujet : {memoire['sujet']}")
 
-    log("📤 ÉTAPE 7 — Envoi à Scratch...")
-    for tentative in range(3):
-        try:
-            conn.set_var("Messages sent", encoded)
-            log("✅ ÉTAPE 8 — Envoyé !")
-            break
-        except Exception as e:
-            log(f"❌ Envoi échoué (tentative {tentative+1}) : {e}")
-            do_connect()
+        # Demander à l'IA si c'est vrai ou faux
+        prompt = (
+            f"Voici une question posée à un élève de {memoire['niveau']}ème "
+            f"sur le sujet {memoire['sujet']} : "
+            f"{memoire['question']} "
+            f"Voici la réponse de l'élève : {reponse_eleve} "
+            f"Cette réponse est-elle correcte ? "
+            f"Réponds UNIQUEMENT par le mot vrai ou le mot faux, "
+            f"rien d'autre, pas de majuscule, pas de ponctuation."
+        )
 
-    time.sleep(2)
-    verif = lire_variable()
-    log(f"🔍 ÉTAPE 9 — Vérification : {verif}")
-    if verif == encoded:
-        log(f"✅ ÉTAPE 10 — Scratch a reçu : '{reponse_clean}'")
-    else:
-        log(f"⚠️ Variable différente : {verif}")
-    log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    return True
+        log("🤖 Vérification par l'IA...")
+        reponse_brute = demander_ia(prompt)
+
+        if not reponse_brute:
+            log("❌ Pas de réponse IA")
+            reset_memoire()
+            log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            return False
+
+        log(f"🤖 Réponse brute : '{reponse_brute}'")
+
+        # Nettoyer : garder juste "vrai" ou "faux"
+        reponse_lower = reponse_brute.lower().strip()
+        if "vrai" in reponse_lower:
+            resultat = "vrai"
+        elif "faux" in reponse_lower:
+            resultat = "faux"
+        else:
+            resultat = ''.join(
+                c for c in reponse_lower if c in CHARS
+            )[:120]
+
+        log(f"✏️ Résultat : '{resultat}'")
+
+        # Envoyer à Scratch
+        encoded = encode(resultat)
+        log(f"🔢 Encodé : {encoded}")
+        log("📤 Envoi du résultat à Scratch...")
+
+        ok = envoyer_scratch(encoded)
+        if ok:
+            log(f"✅ Résultat envoyé : {resultat}")
+        else:
+            log("❌ Échec envoi")
+
+        # Remettre à zéro
+        reset_memoire()
+        log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        return ok
 
 # ══════════════════════════════
 # BOUCLE PRINCIPALE
@@ -193,7 +328,6 @@ def traiter_message(val):
 
 def boucle_ia():
     global status, last_val
-
     time.sleep(2)
 
     for i in range(5):
@@ -209,19 +343,24 @@ def boucle_ia():
     old = lire_variable()
     last_val = old
     log(f"🔄 Valeur initiale ignorée : {old}")
+    reset_memoire()
 
     status = "✅ En ligne"
-    log("✅ Boucle IA prête !")
+    log("✅ DevoirGPT prêt !")
 
     while True:
         try:
             val = lire_variable()
 
-            if val.startswith("1") and len(val) > 2 and val != last_val:
+            if val.startswith("1") and len(val) > 4 and val != last_val:
                 last_val = val
-                status = "🤖 Traitement..."
-                traiter_message(val)
-                status = "✅ En ligne"
+                status = f"🤖 Traitement ({etat})..."
+                try:
+                    traiter_message(val)
+                except Exception as e:
+                    log(f"❌ Erreur traitement : {e}")
+                    do_connect()
+                status = f"✅ En ligne ({etat})"
             elif val != last_val:
                 last_val = val
 
@@ -235,33 +374,24 @@ def boucle_ia():
             if conn:
                 status = "✅ En ligne"
 
-# ══════════════════════════════
-# WATCHDOG — vérifie que le thread tourne
-# ══════════════════════════════
-
 def verifier_thread():
     global ia_thread
     if ia_thread is None or not ia_thread.is_alive():
-        log("🔄 Thread mort → redémarrage !")
+        log("🔄 Thread relancé !")
         ia_thread = threading.Thread(target=boucle_ia, daemon=True)
         ia_thread.start()
         return "relancé"
     return "actif"
-
-# ══════════════════════════════
-# SELF-PING
-# ══════════════════════════════
 
 def self_ping():
     time.sleep(30)
     while True:
         try:
             if RENDER_URL:
-                # Ping /tick au lieu de / pour vérifier le thread
                 http_requests.get(f"{RENDER_URL}/tick", timeout=10)
         except:
             pass
-        time.sleep(240)  # 4 minutes
+        time.sleep(240)
 
 # ══════════════════════════════
 # PAGE WEB
@@ -272,7 +402,7 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>IA Scratch</title>
+<title>DevoirGPT</title>
 <style>
 body { font-family: monospace; background: #fff; padding: 20px;
        max-width: 600px; margin: auto; }
@@ -280,7 +410,9 @@ h1 { font-size: 18px; margin-bottom: 15px; }
 #status { font-size: 16px; padding: 10px; border: 2px solid #000;
           margin-bottom: 5px; text-align: center; }
 #thread { font-size: 12px; padding: 5px; border: 1px solid #ccc;
-          margin-bottom: 10px; text-align: center; color: #666; }
+          margin-bottom: 5px; text-align: center; color: #666; }
+#mem { font-size: 12px; padding: 5px; border: 1px solid #ccc;
+       margin-bottom: 10px; text-align: center; color: #336; }
 #logs { border: 1px solid #ccc; padding: 8px; height: 500px;
         overflow-y: auto; font-size: 11px; background: #f9f9f9;
         line-height: 1.6; }
@@ -288,31 +420,37 @@ h1 { font-size: 18px; margin-bottom: 15px; }
 .err { color: red; font-weight: bold; }
 .step { color: #1565c0; }
 .sep { color: #ccc; }
-.eye { color: #aaa; font-size: 10px; }
 .warn { color: orange; }
+.mem { color: purple; }
 p { font-size: 11px; color: #888; margin: 8px 0; }
 </style>
 </head>
 <body>
-<h1>🤖 IA Scratch</h1>
+<h1>📚 DevoirGPT</h1>
 <div id="status">...</div>
 <div id="thread">...</div>
-<p>Tout est automatique. Ouvre Scratch, appuie ESPACE, pose ta question.</p>
+<div id="mem">...</div>
+<p>Scratch envoie : niveau + sujet → IA génère une question → l'élève répond → IA corrige</p>
 <div id="logs"></div>
 <script>
 function r(){
     fetch('/api').then(r=>r.json()).then(d=>{
         document.getElementById('status').innerText=d.status;
         document.getElementById('thread').innerText=
-            'Thread: '+d.thread+' | Modèle: '+(d.model||'aucun')+' | Cycles: '+d.cycles;
+            'Thread: '+d.thread+' | Modèle: '+(d.model||'aucun');
+        document.getElementById('mem').innerText=
+            'État: '+d.etat+' | Niveau: '+(d.memoire.niveau||'-')+
+            ' | Sujet: '+(d.memoire.sujet||'-')+
+            ' | Question: '+(d.memoire.question||'-').substring(0,40);
         let h='';
         d.logs.forEach(l=>{
             let c='';
             if(l.includes('✅'))c='ok';
             else if(l.includes('❌'))c='err';
-            else if(l.includes('ÉTAPE'))c='step';
+            else if(l.includes('ÉTAPE')||l.includes('📡')||l.includes('📖'))c='step';
             else if(l.includes('━'))c='sep';
             else if(l.includes('⚠'))c='warn';
+            else if(l.includes('💾'))c='mem';
             h+='<div class="'+c+'">'+l+'</div>';
         });
         document.getElementById('logs').innerHTML=h;
@@ -337,7 +475,8 @@ def api():
         logs=logs,
         thread=t,
         model=working_model,
-        cycles=len([l for l in logs if 'ÉTAPE 1' in l])
+        etat=etat,
+        memoire=memoire
     )
 
 @app.route('/tick')
@@ -345,11 +484,6 @@ def tick():
     t = verifier_thread()
     return jsonify(status="ok", thread=t)
 
-@app.route('/logs')
-def get_logs():
-    return jsonify(logs=logs)
-
-# ── Démarrage ──
 ia_thread = threading.Thread(target=boucle_ia, daemon=True)
 ia_thread.start()
 threading.Thread(target=self_ping, daemon=True).start()

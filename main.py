@@ -531,22 +531,36 @@ def boucle_ia():
 
     status = "✅ En ligne"
     log("✅ DevoirGPT v3 prêt !")
-    log("🔑 Login fait UNE SEULE FOIS — ton compte Scratch ne sera plus déconnecté")
+    log("🔑 Login unique — reconnexion cloud seulement")
+
+    derniere_reconnexion = time.time()
 
     while True:
         try:
+            # Reconnexion cloud préventive toutes les 60 secondes
+            # (PAS de login — juste le websocket)
+            if time.time() - derniere_reconnexion > 60:
+                log("🔄 Reconnexion cloud préventive...")
+                connecter_cloud()
+                derniere_reconnexion = time.time()
+
             verifier_timeout()
             val = lire_variable()
 
             if val.startswith("1") and len(val) > 4 and val != last_val:
                 last_val = val
                 status = f"🤖 {etat} ({memoire['index']+1}/10)"
+
+                # Reconnecter le cloud AVANT de traiter (garantit une connexion fraîche)
+                connecter_cloud()
+                derniere_reconnexion = time.time()
+
                 try:
                     traiter_message(val)
                 except Exception as e:
                     log(f"❌ Erreur traitement : {e}")
-                    # Reconnecter seulement le cloud, PAS le login
                     connecter_cloud()
+                    derniere_reconnexion = time.time()
                 status = f"✅ En ligne ({etat})"
             elif val != last_val:
                 last_val = val
@@ -557,11 +571,11 @@ def boucle_ia():
             log(f"❌ Erreur boucle : {e}")
             status = "🔄 Reconnexion cloud..."
             time.sleep(5)
-            # Reconnecter seulement le cloud, PAS le login
             connecter_cloud()
+            derniere_reconnexion = time.time()
             if conn:
                 status = "✅ En ligne"
-
+                
 def verifier_thread():
     global ia_thread
     if ia_thread is None or not ia_thread.is_alive():

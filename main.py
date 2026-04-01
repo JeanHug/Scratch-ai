@@ -19,28 +19,18 @@ GROQ_KEY = os.getenv("GROQ_KEY", "")
 
 genai.configure(api_key=os.getenv("GEMINI_KEY"))
 
-# Modèles Google (fallback final)
-GEMINI_MODELS = [
-    'gemini-3-flash-preview',
-    'gemini-3.1-flash-lite-preview',
-    'gemini-2.5-flash-preview',
-    'gemini-2.0-flash',
-    'gemma-3-27b-it',
-    'gemma-3n-e4b-it',
-]
-
 logs = []
 conn = None
+session_obj = None  # Session Scratch, créée UNE SEULE FOIS
 status = "Démarrage..."
 last_val = ""
 ia_thread = None
-working_provider = None  # "cerebras-qwen", "cerebras-llama", "groq", "gemini-xxx"
+working_provider = None
 
 # ══════════════════════════════
 # MÉMOIRE DEVOIRGPT
 # ══════════════════════════════
 etat = "attente"
-# etats : "attente" → "questions_generees" → "attend_ok" → "attend_reponse" → "attend_ok"...
 memoire = {
     "niveau": "",
     "sujet": "",
@@ -50,7 +40,7 @@ memoire = {
     "timestamp": 0
 }
 
-TIMEOUT = 120  # 2 minutes
+TIMEOUT = 120
 
 def log(msg):
     t = time.strftime("%H:%M:%S")
@@ -62,7 +52,6 @@ def log(msg):
 
 def encode(text):
     try:
-        # Supprimer les espaces au début pour éviter le bug du "0"
         text = text.lower().strip()
         r = "2"
         for c in text:
@@ -116,7 +105,25 @@ def lire_variable():
         log(f"❌ Erreur lecture : {e}")
     return "0"
 
-def do_connect():
+# ══════════════════════════════
+# CONNEXION — Login UNE SEULE FOIS
+# ══════════════════════════════
+
+def login_scratch():
+    """Login Scratch — appelé UNE SEULE FOIS au démarrage"""
+    global session_obj
+    try:
+        log("🔑 Login Scratch (une seule fois)...")
+        session_obj = scratch.login(SCRATCH_USER, SCRATCH_PASS)
+        log("✅ Login OK !")
+        return True
+    except Exception as e:
+        log(f"❌ Login échoué : {e}")
+        session_obj = None
+        return False
+
+def connecter_cloud():
+    """Connecte/reconnecte SEULEMENT le websocket cloud — sans re-login"""
     global conn
     try:
         if conn:
@@ -125,23 +132,28 @@ def do_connect():
             except:
                 pass
             conn = None
-        log("🔌 Connexion Scratch...")
-        s = scratch.login(SCRATCH_USER, SCRATCH_PASS)
-        conn = s.connect_cloud(PROJECT_ID)
+
+        if not session_obj:
+            log("❌ Pas de session — impossible de connecter le cloud")
+            return False
+
+        log("🔌 Connexion cloud...")
+        conn = session_obj.connect_cloud(PROJECT_ID)
         time.sleep(1)
-        log("✅ Connecté !")
+        log("✅ Cloud connecté !")
         return True
     except Exception as e:
-        log(f"❌ Connexion : {e}")
+        log(f"❌ Cloud échoué : {e}")
         conn = None
         return False
 
 def envoyer_scratch(valeur):
+    """Envoie une valeur — reconnecte le cloud si besoin (PAS de re-login)"""
     global conn
     for tentative in range(3):
         try:
             if not conn:
-                do_connect()
+                connecter_cloud()
             if conn:
                 conn.set_var("Messages sent", str(valeur))
                 return True
@@ -149,7 +161,7 @@ def envoyer_scratch(valeur):
             log(f"❌ Envoi tentative {tentative+1} : {e}")
             conn = None
             time.sleep(2)
-            do_connect()
+            connecter_cloud()
     return False
 
 # ══════════════════════════════
@@ -157,7 +169,6 @@ def envoyer_scratch(valeur):
 # ══════════════════════════════
 
 def appeler_cerebras(prompt, model_name):
-    """Appelle l'API Cerebras via HTTP"""
     url = "https://api.cerebras.ai/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
@@ -180,7 +191,6 @@ def appeler_cerebras(prompt, model_name):
     return result["choices"][0]["message"]["content"].strip()
 
 def appeler_groq(prompt, model_name):
-    """Appelle l'API Groq via HTTP"""
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
@@ -201,20 +211,14 @@ def appeler_groq(prompt, model_name):
     return result["choices"][0]["message"]["content"].strip()
 
 def appeler_gemini(prompt, model_name):
-    """Appelle l'API Gemini via google.generativeai"""
     m = genai.GenerativeModel(model_name)
     res = m.generate_content(prompt)
     return res.text.strip()
 
-# Liste ordonnée de tous les modèles à essayer
 TOUS_LES_MODELES = [
-    # Priorité 1 : Cerebras Qwen (le plus puissant)
     {"nom": "cerebras-qwen", "fn": appeler_cerebras, "model": "qwen-3-235b-a22b-instruct-2507"},
-    # Priorité 2 : Cerebras Llama
     {"nom": "cerebras-llama", "fn": appeler_cerebras, "model": "llama3.1-8b"},
-    # Priorité 3 : Groq Llama
     {"nom": "groq-llama", "fn": appeler_groq, "model": "llama-3.1-8b-instant"},
-    # Priorité 4+ : Gemini (plusieurs variantes)
     {"nom": "gemini-3-flash", "fn": appeler_gemini, "model": "gemini-3-flash-preview"},
     {"nom": "gemini-3.1-lite", "fn": appeler_gemini, "model": "gemini-3.1-flash-lite-preview"},
     {"nom": "gemini-2.5-flash", "fn": appeler_gemini, "model": "gemini-2.5-flash-preview"},
@@ -224,7 +228,6 @@ TOUS_LES_MODELES = [
 ]
 
 def demander_ia(prompt_complet):
-    """Essaie chaque modèle dans l'ordre jusqu'à ce qu'un fonctionne"""
     global working_provider
 
     # Si un modèle marchait avant, l'essayer en premier
@@ -294,7 +297,6 @@ def envoyer_question_actuelle():
 
     if idx >= len(questions):
         log("🎉 Toutes les questions ont été posées !")
-        # Envoyer "fin" à Scratch
         encoded = encode("fin")
         envoyer_scratch(encoded)
         reset_memoire()
@@ -379,7 +381,6 @@ def traiter_message(val):
 
         # Parser les 10 questions
         lignes = [l.strip() for l in reponse.split('\n') if l.strip() and len(l.strip()) > 5]
-        # Nettoyer les numéros au début ("1. ", "1) ", etc.)
         questions_clean = []
         for l in lignes:
             # Supprimer numérotation
@@ -416,11 +417,11 @@ def traiter_message(val):
         return True
 
     # ════════════════════════════
-    # ÉTAT : ATTEND OK (Scratch dit "ok" pour recevoir la question suivante)
+    # ÉTAT : ATTEND OK
     # ════════════════════════════
     elif etat == "attend_ok":
         if texte.strip() == "ok":
-            log("👍 OK reçu ! Envoi de la question suivante...")
+            log("👍 OK reçu ! Envoi question suivante...")
             memoire["timestamp"] = time.time()
             ok = envoyer_question_actuelle()
             if ok:
@@ -429,7 +430,6 @@ def traiter_message(val):
             return ok
         else:
             log(f"⚠️ Attendait 'ok', reçu '{texte}'")
-            # Peut-être une nouvelle session ?
             if est_nouvelle_session(texte):
                 reset_memoire()
                 return traiter_message(val)
@@ -502,14 +502,26 @@ def boucle_ia():
     global status, last_val
     time.sleep(2)
 
+    # LOGIN UNE SEULE FOIS
     for i in range(5):
-        if do_connect():
+        if login_scratch():
             break
-        log(f"🔄 Tentative {i+1}/5...")
+        log(f"🔄 Tentative login {i+1}/5...")
         time.sleep(10)
 
+    if not session_obj:
+        status = "❌ Login impossible"
+        return
+
+    # Connecter le cloud
+    for i in range(5):
+        if connecter_cloud():
+            break
+        log(f"🔄 Tentative cloud {i+1}/5...")
+        time.sleep(5)
+
     if not conn:
-        status = "❌ Connexion impossible"
+        status = "❌ Cloud impossible"
         return
 
     old = lire_variable()
@@ -519,20 +531,11 @@ def boucle_ia():
 
     status = "✅ En ligne"
     log("✅ DevoirGPT v3 prêt !")
-    log(f"🤖 Modèles disponibles : Cerebras → Groq → Gemini")
-
-    derniere_reconnexion = time.time()
+    log("🔑 Login fait UNE SEULE FOIS — ton compte Scratch ne sera plus déconnecté")
 
     while True:
         try:
-            # Reconnexion préventive toutes les 90 secondes
-            if time.time() - derniere_reconnexion > 90:
-                log("🔄 Reconnexion préventive...")
-                do_connect()
-                derniere_reconnexion = time.time()
-
             verifier_timeout()
-
             val = lire_variable()
 
             if val.startswith("1") and len(val) > 4 and val != last_val:
@@ -542,8 +545,8 @@ def boucle_ia():
                     traiter_message(val)
                 except Exception as e:
                     log(f"❌ Erreur traitement : {e}")
-                    do_connect()
-                    derniere_reconnexion = time.time()
+                    # Reconnecter seulement le cloud, PAS le login
+                    connecter_cloud()
                 status = f"✅ En ligne ({etat})"
             elif val != last_val:
                 last_val = val
@@ -552,10 +555,10 @@ def boucle_ia():
 
         except Exception as e:
             log(f"❌ Erreur boucle : {e}")
-            status = "🔄 Reconnexion..."
+            status = "🔄 Reconnexion cloud..."
             time.sleep(5)
-            do_connect()
-            derniere_reconnexion = time.time()
+            # Reconnecter seulement le cloud, PAS le login
+            connecter_cloud()
             if conn:
                 status = "✅ En ligne"
 
@@ -615,7 +618,7 @@ p { font-size: 11px; color: #888; margin: 8px 0; }
 <div id="status">...</div>
 <div id="thread">...</div>
 <div id="mem">...</div>
-<p>Modèles : Cerebras (Qwen 235B → Llama 8B) → Groq (Llama 8B) → Gemini</p>
+<p>Modèles : Cerebras → Groq → Gemini | Login unique (pas de déconnexion)</p>
 <div id="logs"></div>
 <script>
 function r(){

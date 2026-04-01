@@ -14,10 +14,13 @@ PROJECT_ID = os.getenv("SCRATCH_ID", "")
 SCRATCH_USER = os.getenv("SCRATCH_USER", "")
 SCRATCH_PASS = os.getenv("SCRATCH_PASS", "")
 RENDER_URL = os.getenv("RENDER_URL", "")
+CEREBRAS_KEY = os.getenv("CEREBRAS_KEY", "")
+GROQ_KEY = os.getenv("GROQ_KEY", "")
 
 genai.configure(api_key=os.getenv("GEMINI_KEY"))
 
-MODELS = [
+# Modèles Google (fallback final)
+GEMINI_MODELS = [
     'gemini-3-flash-preview',
     'gemini-3.1-flash-lite-preview',
     'gemini-2.5-flash-preview',
@@ -31,9 +34,13 @@ conn = None
 status = "Démarrage..."
 last_val = ""
 ia_thread = None
-working_model = None
+working_provider = None  # "cerebras-qwen", "cerebras-llama", "groq", "gemini-xxx"
 
+# ══════════════════════════════
+# MÉMOIRE DEVOIRGPT
+# ══════════════════════════════
 etat = "attente"
+# etats : "attente" → "questions_generees" → "attend_ok" → "attend_reponse" → "attend_ok"...
 memoire = {
     "niveau": "",
     "sujet": "",
@@ -43,7 +50,7 @@ memoire = {
     "timestamp": 0
 }
 
-TIMEOUT = 120
+TIMEOUT = 120  # 2 minutes
 
 def log(msg):
     t = time.strftime("%H:%M:%S")
@@ -55,6 +62,7 @@ def log(msg):
 
 def encode(text):
     try:
+        # Supprimer les espaces au début pour éviter le bug du "0"
         text = text.lower().strip()
         r = "2"
         for c in text:
@@ -144,31 +152,111 @@ def envoyer_scratch(valeur):
             do_connect()
     return False
 
+# ══════════════════════════════
+# ROUTEUR IA — Cerebras → Groq → Gemini
+# ══════════════════════════════
+
+def appeler_cerebras(prompt, model_name):
+    """Appelle l'API Cerebras via HTTP"""
+    url = "https://api.cerebras.ai/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {CEREBRAS_KEY}"
+    }
+    data = {
+        "model": model_name,
+        "stream": False,
+        "max_tokens": 2048,
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ]
+    }
+    r = http_requests.post(url, headers=headers, json=data, timeout=30)
+    if r.status_code != 200:
+        raise Exception(f"HTTP {r.status_code}: {r.text[:200]}")
+    result = r.json()
+    return result["choices"][0]["message"]["content"].strip()
+
+def appeler_groq(prompt, model_name):
+    """Appelle l'API Groq via HTTP"""
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {GROQ_KEY}"
+    }
+    data = {
+        "model": model_name,
+        "max_tokens": 2048,
+        "temperature": 0.7,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ]
+    }
+    r = http_requests.post(url, headers=headers, json=data, timeout=30)
+    if r.status_code != 200:
+        raise Exception(f"HTTP {r.status_code}: {r.text[:200]}")
+    result = r.json()
+    return result["choices"][0]["message"]["content"].strip()
+
+def appeler_gemini(prompt, model_name):
+    """Appelle l'API Gemini via google.generativeai"""
+    m = genai.GenerativeModel(model_name)
+    res = m.generate_content(prompt)
+    return res.text.strip()
+
+# Liste ordonnée de tous les modèles à essayer
+TOUS_LES_MODELES = [
+    # Priorité 1 : Cerebras Qwen (le plus puissant)
+    {"nom": "cerebras-qwen", "fn": appeler_cerebras, "model": "qwen-3-235b-a22b-instruct-2507"},
+    # Priorité 2 : Cerebras Llama
+    {"nom": "cerebras-llama", "fn": appeler_cerebras, "model": "llama3.1-8b"},
+    # Priorité 3 : Groq Llama
+    {"nom": "groq-llama", "fn": appeler_groq, "model": "llama-3.1-8b-instant"},
+    # Priorité 4+ : Gemini (plusieurs variantes)
+    {"nom": "gemini-3-flash", "fn": appeler_gemini, "model": "gemini-3-flash-preview"},
+    {"nom": "gemini-3.1-lite", "fn": appeler_gemini, "model": "gemini-3.1-flash-lite-preview"},
+    {"nom": "gemini-2.5-flash", "fn": appeler_gemini, "model": "gemini-2.5-flash-preview"},
+    {"nom": "gemini-2.0-flash", "fn": appeler_gemini, "model": "gemini-2.0-flash"},
+    {"nom": "gemma-3-27b", "fn": appeler_gemini, "model": "gemma-3-27b-it"},
+    {"nom": "gemma-3n-e4b", "fn": appeler_gemini, "model": "gemma-3n-e4b-it"},
+]
+
 def demander_ia(prompt_complet):
-    global working_model
+    """Essaie chaque modèle dans l'ordre jusqu'à ce qu'un fonctionne"""
+    global working_provider
 
-    if working_model:
+    # Si un modèle marchait avant, l'essayer en premier
+    if working_provider:
+        for m in TOUS_LES_MODELES:
+            if m["nom"] == working_provider:
+                try:
+                    result = m["fn"](prompt_complet, m["model"])
+                    log(f"✅ IA OK ({m['nom']})")
+                    return result
+                except Exception as e:
+                    log(f"⚠️ {m['nom']} a planté : {e}")
+                    working_provider = None
+                break
+
+    # Essayer chaque modèle dans l'ordre
+    for m in TOUS_LES_MODELES:
         try:
-            m = genai.GenerativeModel(working_model)
-            res = m.generate_content(prompt_complet)
-            log(f"✅ IA OK ({working_model})")
-            return res.text.strip()
+            log(f"🤖 Essai {m['nom']} ({m['model']})...")
+            result = m["fn"](prompt_complet, m["model"])
+            log(f"✅ IA OK avec {m['nom']}")
+            working_provider = m["nom"]
+            return result
         except Exception as e:
-            log(f"⚠️ {working_model} a planté : {e}")
-            working_model = None
+            log(f"❌ {m['nom']} échoué : {e}")
 
-    for model_name in MODELS:
-        try:
-            log(f"🤖 Essai {model_name}...")
-            m = genai.GenerativeModel(model_name)
-            res = m.generate_content(prompt_complet)
-            log(f"✅ IA OK avec {model_name}")
-            working_model = model_name
-            return res.text.strip()
-        except Exception as e:
-            log(f"❌ {model_name} échoué : {e}")
-
+    log("❌ TOUS LES MODÈLES ONT ÉCHOUÉ")
     return None
+
+# ══════════════════════════════
+# FONCTIONS MÉMOIRE
+# ══════════════════════════════
 
 def reset_memoire():
     global etat, memoire
@@ -184,11 +272,13 @@ def reset_memoire():
     log("🧹 Mémoire effacée")
 
 def est_nouvelle_session(texte):
+    """Détecte si le message est niveau+sujet (1er char = chiffre, reste = texte)"""
     if len(texte) < 2:
         return False
     return texte[0].isdigit() and not texte[1:].strip().isdigit()
 
 def verifier_timeout():
+    """Vérifie si la session a expiré"""
     if memoire["timestamp"] > 0:
         elapsed = time.time() - memoire["timestamp"]
         if elapsed > TIMEOUT:
@@ -198,11 +288,13 @@ def verifier_timeout():
     return False
 
 def envoyer_question_actuelle():
+    """Envoie la question courante à Scratch"""
     idx = memoire["index"]
     questions = memoire["questions"]
 
     if idx >= len(questions):
         log("🎉 Toutes les questions ont été posées !")
+        # Envoyer "fin" à Scratch
         encoded = encode("fin")
         envoyer_scratch(encoded)
         reset_memoire()
@@ -224,6 +316,10 @@ def envoyer_question_actuelle():
         log("❌ Échec envoi question")
     return ok
 
+# ══════════════════════════════
+# TRAITEMENT
+# ══════════════════════════════
+
 def traiter_message(val):
     global etat, memoire
 
@@ -239,12 +335,16 @@ def traiter_message(val):
 
     log(f"📖 Décodé : '{texte}'")
 
+    # ── Détection nouvelle session ──
     if est_nouvelle_session(texte) and etat != "attente":
         log("🔄 Nouvelle session détectée ! Reset...")
         reset_memoire()
 
     verifier_timeout()
 
+    # ════════════════════════════
+    # ÉTAT : ATTENTE (niveau + sujet)
+    # ════════════════════════════
     if etat == "attente":
         if not est_nouvelle_session(texte):
             log("⚠️ Message ignoré (pas un niveau+sujet)")
@@ -277,11 +377,15 @@ def traiter_message(val):
 
         log(f"🤖 Réponse brute :\n{reponse}")
 
+        # Parser les 10 questions
         lignes = [l.strip() for l in reponse.split('\n') if l.strip() and len(l.strip()) > 5]
+        # Nettoyer les numéros au début ("1. ", "1) ", etc.)
         questions_clean = []
         for l in lignes:
+            # Supprimer numérotation
             while l and (l[0].isdigit() or l[0] in '.)-:'):
                 l = l[1:].strip()
+            # Nettoyer caractères non supportés
             l_clean = ''.join(c for c in l.lower() if c in CHARS).strip()
             if l_clean and len(l_clean) > 5:
                 questions_clean.append(l_clean)
@@ -291,6 +395,7 @@ def traiter_message(val):
             log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return False
 
+        # Garder max 10
         questions_clean = questions_clean[:10]
         log(f"✅ {len(questions_clean)} questions générées :")
         for i, q in enumerate(questions_clean):
@@ -303,15 +408,19 @@ def traiter_message(val):
         memoire["timestamp"] = time.time()
         etat = "attend_ok"
 
+        # Envoyer la première question directement
         envoyer_question_actuelle()
         etat = "attend_reponse"
 
         log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         return True
 
+    # ════════════════════════════
+    # ÉTAT : ATTEND OK (Scratch dit "ok" pour recevoir la question suivante)
+    # ════════════════════════════
     elif etat == "attend_ok":
         if texte.strip() == "ok":
-            log("👍 OK reçu ! Envoi question suivante...")
+            log("👍 OK reçu ! Envoi de la question suivante...")
             memoire["timestamp"] = time.time()
             ok = envoyer_question_actuelle()
             if ok:
@@ -320,12 +429,16 @@ def traiter_message(val):
             return ok
         else:
             log(f"⚠️ Attendait 'ok', reçu '{texte}'")
+            # Peut-être une nouvelle session ?
             if est_nouvelle_session(texte):
                 reset_memoire()
                 return traiter_message(val)
             log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return False
 
+    # ════════════════════════════
+    # ÉTAT : ATTEND RÉPONSE DE L'ÉLÈVE
+    # ════════════════════════════
     elif etat == "attend_reponse":
         reponse_eleve = texte
         log(f"📝 Réponse élève : '{reponse_eleve}'")
@@ -367,6 +480,7 @@ def traiter_message(val):
         if ok:
             log(f"✅ Envoyé : {resultat}")
 
+        # Passer à la question suivante
         memoire["index"] += 1
         memoire["timestamp"] = time.time()
 
@@ -379,6 +493,10 @@ def traiter_message(val):
 
         log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         return ok
+
+# ══════════════════════════════
+# BOUCLE
+# ══════════════════════════════
 
 def boucle_ia():
     global status, last_val
@@ -400,18 +518,21 @@ def boucle_ia():
     reset_memoire()
 
     status = "✅ En ligne"
-    log("✅ DevoirGPT v2 prêt !")
+    log("✅ DevoirGPT v3 prêt !")
+    log(f"🤖 Modèles disponibles : Cerebras → Groq → Gemini")
 
     derniere_reconnexion = time.time()
 
     while True:
         try:
+            # Reconnexion préventive toutes les 90 secondes
             if time.time() - derniere_reconnexion > 90:
                 log("🔄 Reconnexion préventive...")
                 do_connect()
                 derniere_reconnexion = time.time()
 
             verifier_timeout()
+
             val = lire_variable()
 
             if val.startswith("1") and len(val) > 4 and val != last_val:
@@ -457,6 +578,10 @@ def self_ping():
             pass
         time.sleep(25)
 
+# ══════════════════════════════
+# PAGE WEB
+# ══════════════════════════════
+
 HTML = """
 <!DOCTYPE html>
 <html>
@@ -486,18 +611,18 @@ p { font-size: 11px; color: #888; margin: 8px 0; }
 </style>
 </head>
 <body>
-<h1>📚 DevoirGPT v2</h1>
+<h1>📚 DevoirGPT v3</h1>
 <div id="status">...</div>
 <div id="thread">...</div>
 <div id="mem">...</div>
-<p>Scratch envoie niveau+sujet → 10 questions → l'élève répond → vrai/faux</p>
+<p>Modèles : Cerebras (Qwen 235B → Llama 8B) → Groq (Llama 8B) → Gemini</p>
 <div id="logs"></div>
 <script>
 function r(){
     fetch('/api').then(r=>r.json()).then(d=>{
         document.getElementById('status').innerText=d.status;
         document.getElementById('thread').innerText=
-            'Thread: '+d.thread+' | Modèle: '+(d.model||'aucun');
+            'Thread: '+d.thread+' | IA: '+(d.model||'aucun');
         let m=d.memoire;
         document.getElementById('mem').innerHTML=
             'État: <b>'+d.etat+'</b> | Niveau: '+(m.niveau||'-')+
@@ -533,7 +658,7 @@ def home():
 def api():
     t = verifier_thread()
     return jsonify(
-        status=status, logs=logs, thread=t, model=working_model,
+        status=status, logs=logs, thread=t, model=working_provider,
         etat=etat, memoire=memoire
     )
 
@@ -542,6 +667,7 @@ def tick():
     t = verifier_thread()
     return jsonify(status="ok", thread=t)
 
+# ── Démarrage ──
 ia_thread = threading.Thread(target=boucle_ia, daemon=True)
 ia_thread.start()
 threading.Thread(target=self_ping, daemon=True).start()

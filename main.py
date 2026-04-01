@@ -26,11 +26,8 @@ status = "Démarrage..."
 last_val = ""
 ia_thread = None
 working_provider = None
-modeles_status = {}  # État de chaque modèle
+modeles_status = {}
 
-# ══════════════════════════════
-# MÉMOIRE DEVOIRGPT
-# ══════════════════════════════
 etat = "attente"
 memoire = {
     "niveau": "",
@@ -106,14 +103,10 @@ def lire_variable():
         log(f"❌ Erreur lecture : {e}")
     return "0"
 
-# ══════════════════════════════
-# CONNEXION — Login UNE SEULE FOIS
-# ══════════════════════════════
-
 def login_scratch():
     global session_obj
     try:
-        log("🔑 Login Scratch (une seule fois)...")
+        log("🔑 Login Scratch...")
         session_obj = scratch.login(SCRATCH_USER, SCRATCH_PASS)
         log("✅ Login OK !")
         return True
@@ -131,11 +124,9 @@ def connecter_cloud():
             except:
                 pass
             conn = None
-
         if not session_obj:
             log("❌ Pas de session")
             return False
-
         log("🔌 Connexion cloud...")
         conn = session_obj.connect_cloud(PROJECT_ID)
         time.sleep(1)
@@ -146,41 +137,73 @@ def connecter_cloud():
         conn = None
         return False
 
+def login_et_cloud():
+    """Login complet + cloud — utilisé en dernier recours"""
+    global session_obj, conn
+    try:
+        if conn:
+            try:
+                conn.disconnect()
+            except:
+                pass
+            conn = None
+        log("🔑🔌 Login complet + cloud...")
+        session_obj = scratch.login(SCRATCH_USER, SCRATCH_PASS)
+        conn = session_obj.connect_cloud(PROJECT_ID)
+        time.sleep(1)
+        log("✅ Login + cloud OK !")
+        return True
+    except Exception as e:
+        log(f"❌ Login complet échoué : {e}")
+        conn = None
+        return False
+
 def envoyer_scratch(valeur):
-    """Envoie une valeur avec retry, reconnexion cloud, ET vérification"""
+    """Envoie avec 5 tentatives : reconnexion cloud → login complet → vérification"""
     global conn
     valeur_str = str(valeur)
 
-    for tentative in range(3):
+    for tentative in range(5):
         try:
-            if not conn:
+            # Tentatives 1-3 : reconnexion cloud seulement
+            # Tentatives 4-5 : login complet
+            if tentative >= 3:
+                log(f"🔑 Tentative {tentative+1} : login complet...")
+                login_et_cloud()
+            elif tentative > 0 or not conn:
+                log(f"🔌 Tentative {tentative+1} : reconnexion cloud...")
                 connecter_cloud()
-            if conn:
-                conn.set_var("Messages sent", valeur_str)
-                log(f"📤 Envoi tentative {tentative+1} : {valeur_str[:30]}...")
 
-                # VÉRIFICATION : attendre et relire pour confirmer
+            if not conn:
+                log(f"❌ Tentative {tentative+1} : pas de connexion")
+                time.sleep(2)
+                continue
+
+            conn.set_var("Messages sent", valeur_str)
+            log(f"📤 Tentative {tentative+1} : valeur écrite")
+
+            # Vérifier 3 fois avec délai
+            for verif_try in range(3):
                 time.sleep(2)
                 verif = lire_variable()
                 if verif == valeur_str:
-                    log(f"✅ Vérifié : Scratch a bien reçu !")
+                    log(f"✅ Vérifié (essai {verif_try+1}) : Scratch a reçu !")
                     return True
-                else:
-                    log(f"⚠️ Vérification échouée : attendu {valeur_str[:20]}, lu {verif[:20]}")
-                    log(f"🔄 Reconnexion cloud et nouvel essai...")
-                    conn = None
-                    connecter_cloud()
+                log(f"⚠️ Vérif {verif_try+1} : attendu {valeur_str[:15]}..., lu {verif[:15]}...")
+
+            log(f"❌ Tentative {tentative+1} : vérification échouée")
+            conn = None
+
         except Exception as e:
-            log(f"❌ Envoi tentative {tentative+1} : {e}")
+            log(f"❌ Tentative {tentative+1} exception : {e}")
             conn = None
             time.sleep(2)
-            connecter_cloud()
 
-    log("❌ Échec envoi après 3 tentatives vérifiées")
+    log("❌❌❌ ÉCHEC TOTAL après 5 tentatives")
     return False
 
 # ══════════════════════════════
-# ROUTEUR IA — Cerebras → Groq → Gemini
+# ROUTEUR IA
 # ══════════════════════════════
 
 def appeler_cerebras(prompt, model_name):
@@ -195,9 +218,7 @@ def appeler_cerebras(prompt, model_name):
         "max_tokens": 2048,
         "temperature": 0.7,
         "top_p": 0.8,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
+        "messages": [{"role": "user", "content": prompt}]
     }
     r = http_requests.post(url, headers=headers, json=data, timeout=30)
     if r.status_code != 200:
@@ -215,9 +236,7 @@ def appeler_groq(prompt, model_name):
         "model": model_name,
         "max_tokens": 2048,
         "temperature": 0.7,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
+        "messages": [{"role": "user", "content": prompt}]
     }
     r = http_requests.post(url, headers=headers, json=data, timeout=30)
     if r.status_code != 200:
@@ -245,7 +264,6 @@ TOUS_LES_MODELES = [
 def demander_ia(prompt_complet):
     global working_provider, modeles_status
 
-    # Si un modèle marchait avant, l'essayer en premier
     if working_provider:
         for m in TOUS_LES_MODELES:
             if m["nom"] == working_provider:
@@ -260,10 +278,9 @@ def demander_ia(prompt_complet):
                     working_provider = None
                 break
 
-    # Essayer chaque modèle dans l'ordre
     for m in TOUS_LES_MODELES:
         try:
-            log(f"🤖 Essai {m['nom']} ({m['model']})...")
+            log(f"🤖 Essai {m['nom']}...")
             result = m["fn"](prompt_complet, m["model"])
             log(f"✅ IA OK avec {m['nom']}")
             working_provider = m["nom"]
@@ -275,10 +292,6 @@ def demander_ia(prompt_complet):
 
     log("❌ TOUS LES MODÈLES ONT ÉCHOUÉ")
     return None
-
-# ══════════════════════════════
-# FONCTIONS MÉMOIRE
-# ══════════════════════════════
 
 def reset_memoire():
     global etat, memoire
@@ -294,7 +307,6 @@ def reset_memoire():
     log("🧹 Mémoire effacée")
 
 def est_nouvelle_session(texte):
-    """Détecte si le message est niveau+sujet"""
     if len(texte) < 3:
         return False
     if not texte[0].isdigit():
@@ -303,7 +315,6 @@ def est_nouvelle_session(texte):
     return any(c.isalpha() for c in reste)
 
 def verifier_timeout():
-    """Vérifie si la session a expiré"""
     if memoire["timestamp"] > 0:
         elapsed = time.time() - memoire["timestamp"]
         if elapsed > TIMEOUT:
@@ -313,7 +324,6 @@ def verifier_timeout():
     return False
 
 def envoyer_question_actuelle():
-    """Envoie la question courante à Scratch"""
     idx = memoire["index"]
     questions = memoire["questions"]
 
@@ -331,24 +341,14 @@ def envoyer_question_actuelle():
     log(f"📝 Question {idx+1}/{len(questions)} : '{question}'")
 
     encoded = encode(question)
-    log(f"🔢 Encodée ({len(encoded)} chiffres) : {encoded}")
+    log(f"🔢 Encodée ({len(encoded)} chiffres)")
 
     ok = envoyer_scratch(encoded)
     if ok:
-        log(f"✅ Question {idx+1} envoyée et vérifiée !")
+        log(f"✅ Question {idx+1} confirmée !")
     else:
-        log("❌ Échec envoi question — reconnexion et nouvel essai")
-        connecter_cloud()
-        ok = envoyer_scratch(encoded)
-        if ok:
-            log(f"✅ Question {idx+1} envoyée au 2ème essai !")
-        else:
-            log("❌ Échec définitif")
+        log(f"❌ Question {idx+1} : échec total")
     return ok
-
-# ══════════════════════════════
-# TRAITEMENT
-# ══════════════════════════════
 
 def traiter_message(val):
     global etat, memoire
@@ -365,19 +365,15 @@ def traiter_message(val):
 
     log(f"📖 Décodé : '{texte}'")
 
-    # ── Détection nouvelle session ──
     if est_nouvelle_session(texte) and etat != "attente":
         log("🔄 Nouvelle session détectée ! Reset...")
         reset_memoire()
 
     verifier_timeout()
 
-    # ════════════════════════════
-    # ÉTAT : ATTENTE (niveau + sujet)
-    # ════════════════════════════
     if etat == "attente":
         if not est_nouvelle_session(texte):
-            log(f"⚠️ Message ignoré : '{texte}' (pas un niveau+sujet, besoin chiffre+lettres)")
+            log(f"⚠️ Ignoré : '{texte}' (pas niveau+sujet)")
             log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return False
 
@@ -407,26 +403,22 @@ def traiter_message(val):
 
         log(f"🤖 Réponse brute :\n{reponse}")
 
-        # Parser les 10 questions
         lignes = [l.strip() for l in reponse.split('\n') if l.strip() and len(l.strip()) > 5]
         questions_clean = []
         for l in lignes:
-            # Supprimer numérotation
             while l and (l[0].isdigit() or l[0] in '.)-:'):
                 l = l[1:].strip()
-            # Nettoyer caractères non supportés
             l_clean = ''.join(c for c in l.lower() if c in CHARS).strip()
             if l_clean and len(l_clean) > 5:
                 questions_clean.append(l_clean)
 
         if len(questions_clean) < 1:
-            log("❌ Aucune question valide générée")
+            log("❌ Aucune question valide")
             log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return False
 
-        # Garder max 10
         questions_clean = questions_clean[:10]
-        log(f"✅ {len(questions_clean)} questions générées :")
+        log(f"✅ {len(questions_clean)} questions :")
         for i, q in enumerate(questions_clean):
             log(f"   {i+1}. {q}")
 
@@ -437,27 +429,16 @@ def traiter_message(val):
         memoire["timestamp"] = time.time()
         etat = "attend_ok"
 
-        # Reconnecter cloud avant d'envoyer
-        connecter_cloud()
-
-        # Envoyer la première question directement
         envoyer_question_actuelle()
         etat = "attend_reponse"
 
         log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         return True
 
-    # ════════════════════════════
-    # ÉTAT : ATTEND OK
-    # ════════════════════════════
     elif etat == "attend_ok":
         if texte.strip() == "ok":
-            log("👍 OK reçu ! Envoi question suivante...")
+            log("👍 OK reçu !")
             memoire["timestamp"] = time.time()
-
-            # Reconnecter cloud avant d'envoyer
-            connecter_cloud()
-
             ok = envoyer_question_actuelle()
             if ok:
                 etat = "attend_reponse"
@@ -465,19 +446,15 @@ def traiter_message(val):
             return ok
         else:
             log(f"⚠️ Attendait 'ok', reçu '{texte}'")
-            # Peut-être une nouvelle session ?
             if est_nouvelle_session(texte):
                 reset_memoire()
                 return traiter_message(val)
             log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return False
 
-    # ════════════════════════════
-    # ÉTAT : ATTEND RÉPONSE DE L'ÉLÈVE
-    # ════════════════════════════
     elif etat == "attend_reponse":
         reponse_eleve = texte
-        log(f"📝 Réponse élève : '{reponse_eleve}'")
+        log(f"📝 Réponse : '{reponse_eleve}'")
         log(f"💾 Question : '{memoire['question_actuelle']}'")
 
         prompt = (
@@ -499,7 +476,7 @@ def traiter_message(val):
             log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             return False
 
-        log(f"🤖 Réponse : '{reponse_brute}'")
+        log(f"🤖 Réponse IA : '{reponse_brute}'")
 
         reponse_lower = reponse_brute.lower().strip()
         if "vrai" in reponse_lower:
@@ -511,39 +488,31 @@ def traiter_message(val):
 
         log(f"✏️ Résultat : '{resultat}'")
 
-        # Reconnecter cloud avant d'envoyer
-        connecter_cloud()
-
         encoded = encode(resultat)
         ok = envoyer_scratch(encoded)
-        if ok:
-            log(f"✅ Envoyé et vérifié : {resultat}")
-        else:
-            log("❌ Échec envoi résultat")
 
-        # Passer à la question suivante
+        if ok:
+            log(f"✅ '{resultat}' confirmé reçu par Scratch !")
+        else:
+            log(f"❌ '{resultat}' NON reçu par Scratch")
+
         memoire["index"] += 1
         memoire["timestamp"] = time.time()
 
         if memoire["index"] >= len(memoire["questions"]):
-            log("🎉 10/10 questions terminées !")
+            log("🎉 10/10 terminé !")
             reset_memoire()
         else:
             etat = "attend_ok"
-            log(f"⏳ En attente de 'ok' pour question {memoire['index']+1}")
+            log(f"⏳ Attente 'ok' pour question {memoire['index']+1}")
 
         log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         return ok
-
-# ══════════════════════════════
-# BOUCLE
-# ══════════════════════════════
 
 def boucle_ia():
     global status, last_val
     time.sleep(2)
 
-    # LOGIN UNE SEULE FOIS
     for i in range(5):
         if login_scratch():
             break
@@ -554,7 +523,6 @@ def boucle_ia():
         status = "❌ Login impossible"
         return
 
-    # Connecter le cloud
     for i in range(5):
         if connecter_cloud():
             break
@@ -571,8 +539,7 @@ def boucle_ia():
     reset_memoire()
 
     status = "✅ En ligne"
-    log("✅ DevoirGPT v4 prêt !")
-    log("🔑 Login unique — reconnexion cloud seulement")
+    log("✅ DevoirGPT v5 prêt !")
 
     while True:
         try:
@@ -595,7 +562,7 @@ def boucle_ia():
 
         except Exception as e:
             log(f"❌ Erreur boucle : {e}")
-            status = "🔄 Reconnexion cloud..."
+            status = "🔄 Reconnexion..."
             time.sleep(5)
             connecter_cloud()
             if conn:
@@ -620,12 +587,7 @@ def self_ping():
             pass
         time.sleep(25)
 
-# ══════════════════════════════
-# TEST DES MODÈLES
-# ══════════════════════════════
-
 def tester_tous_modeles():
-    """Teste chaque modèle et met à jour modeles_status"""
     global modeles_status
     log("🧪 Test de tous les modèles...")
     for m in TOUS_LES_MODELES:
@@ -633,7 +595,7 @@ def tester_tous_modeles():
             log(f"🧪 Test {m['nom']}...")
             result = m["fn"]("Dis juste ok", m["model"])
             modeles_status[m["nom"]] = {
-                "status": f"✅ OK → '{result[:30]}'",
+                "status": f"✅ → '{result[:30]}'",
                 "time": time.strftime("%H:%M:%S")
             }
             log(f"✅ {m['nom']} OK")
@@ -643,10 +605,6 @@ def tester_tous_modeles():
                 "time": time.strftime("%H:%M:%S")
             }
             log(f"❌ {m['nom']} : {e}")
-
-# ══════════════════════════════
-# PAGE WEB
-# ══════════════════════════════
 
 HTML = """
 <!DOCTYPE html>
@@ -687,23 +645,22 @@ button:hover { background: #ddd; }
 </style>
 </head>
 <body>
-<h1>📚 DevoirGPT v4</h1>
+<h1>📚 DevoirGPT v5</h1>
 <div id="status">...</div>
 <div id="thread">...</div>
 <div id="mem">...</div>
 
 <div style="margin-bottom:10px">
     <button onclick="toggleModels()">🤖 État des modèles</button>
-    <button onclick="testModels()">🧪 Tester tous les modèles</button>
+    <button onclick="testModels()">🧪 Tester tous</button>
 </div>
 
 <div id="models">
-    <h2>🤖 État des modèles IA</h2>
-    <div id="models_content">Clique sur "Tester tous les modèles"</div>
+    <h2>🤖 Modèles IA</h2>
+    <div id="models_content">Clique "Tester tous"</div>
 </div>
 
-<p>Modèles : Cerebras → Groq → Gemini | Envoi vérifié | Login unique</p>
-
+<p>Cerebras → Groq → Gemini | Envoi vérifié 5x | Login unique</p>
 <div id="logs"></div>
 
 <script>
@@ -712,39 +669,32 @@ function toggleModels() {
     el.style.display = el.style.display === 'none' ? 'block' : 'none';
     refreshModels();
 }
-
 function testModels() {
     document.getElementById('models').style.display = 'block';
-    document.getElementById('models_content').innerHTML = '⏳ Test en cours...';
+    document.getElementById('models_content').innerHTML = '⏳ Test...';
     fetch('/test_models').then(r=>r.json()).then(d=>{
-        document.getElementById('status').innerText = d.status;
         refreshModels();
         refreshLogs();
     });
 }
-
 function refreshModels() {
     fetch('/api').then(r=>r.json()).then(d=>{
         let ms = d.modeles_status;
         if (!ms || Object.keys(ms).length === 0) {
-            document.getElementById('models_content').innerHTML = 'Aucun test effectué';
+            document.getElementById('models_content').innerHTML = 'Aucun test';
             return;
         }
-        let html = '<table>';
-        html += '<tr><td><b>Modèle</b></td><td><b>État</b></td><td><b>Heure</b></td></tr>';
+        let html = '<table><tr><td><b>Modèle</b></td><td><b>État</b></td><td><b>Heure</b></td></tr>';
         for (let nom in ms) {
             let s = ms[nom];
             let cls = s.status.includes('✅') ? 'model_ok' : 'model_err';
             html += '<tr><td>' + nom + '</td><td class="' + cls + '">' + s.status + '</td><td>' + s.time + '</td></tr>';
         }
         html += '</table>';
-        if (d.model) {
-            html += '<br><b>Modèle actif : ' + d.model + '</b>';
-        }
+        if (d.model) html += '<br><b>Actif : ' + d.model + '</b>';
         document.getElementById('models_content').innerHTML = html;
     });
 }
-
 function refreshLogs() {
     fetch('/api').then(r=>r.json()).then(d=>{
         document.getElementById('status').innerText=d.status;
@@ -771,7 +721,6 @@ function refreshLogs() {
         document.getElementById('logs').scrollTop=99999;
     });
 }
-
 setInterval(refreshLogs,2000);
 refreshLogs();
 </script>
@@ -801,7 +750,6 @@ def test_models_route():
     tester_tous_modeles()
     return jsonify(status="Tests terminés")
 
-# ── Démarrage ──
 ia_thread = threading.Thread(target=boucle_ia, daemon=True)
 ia_thread.start()
 threading.Thread(target=self_ping, daemon=True).start()

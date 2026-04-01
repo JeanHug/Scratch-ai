@@ -275,10 +275,15 @@ def reset_memoire():
     log("🧹 Mémoire effacée")
 
 def est_nouvelle_session(texte):
-    """Détecte si le message est niveau+sujet (1er char = chiffre, reste = texte)"""
-    if len(texte) < 2:
+    """Détecte si le message est niveau+sujet"""
+    if len(texte) < 3:
         return False
-    return texte[0].isdigit() and not texte[1:].strip().isdigit()
+    # Le premier caractère doit être un chiffre (le niveau)
+    if not texte[0].isdigit():
+        return False
+    reste = texte[1:].strip()
+    # Le reste doit contenir au moins une lettre (le sujet)
+    return any(c.isalpha() for c in reste)
 
 def verifier_timeout():
     """Vérifie si la session a expiré"""
